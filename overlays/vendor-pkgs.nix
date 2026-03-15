@@ -2,6 +2,8 @@ self: super: { # final: prev:
 
   libraspberrypi = super.callPackage ../pkgs/raspberrypi/libraspberrypi.nix {};
 
+  raspberrypi-eeprom = super.callPackage ../pkgs/raspberrypi/raspberrypi-eeprom .nix {};
+
   raspberrypi-userland = self.libraspberrypi;
 
   raspberrypi-udev-rules = super.callPackage ../pkgs/raspberrypi/udev-rules.nix {};
