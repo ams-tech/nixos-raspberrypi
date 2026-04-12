@@ -75,6 +75,7 @@
     nixosModules = {
       trusted-nix-caches = import ./modules/trusted-nix-caches.nix;
       nixpkgs-rpi = import ./modules/nixpkgs-rpi.nix;
+      rpi-otp-derived-key = import ./modules/rpi-otp-derived-key.nix;
 
       bootloader = import ./modules/system/boot/loader/raspberrypi;
       default = import ./modules/raspberrypi.nix;
