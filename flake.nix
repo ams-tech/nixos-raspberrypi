@@ -129,7 +129,7 @@
 
     # "RPi world": nixpkgs with all overlays applied "globally", i.e.
     # all packages here depend on rpi's/optimized versions of the dependencies
-    # * used inside the modules, where a choice of "sane defaults" about the 
+    # * used inside the modules, where a choice of "sane defaults" about the
     #   nixpkgs channel had to be made
     # * binary cache is generated from this package set
     legacyPackages = mkLegacyPackagesFor nixpkgs;
@@ -154,11 +154,12 @@
 
       raspberrypi-utils = pkgs.raspberrypi-utils;
       raspberrypi-udev-rules = (pkgs.callPackage ./pkgs/raspberrypi/udev-rules.nix {});
+      rpi-otp-private-key = pkgs.rpi-otp-private-key;
       rpicam-apps = pkgs.rpicam-apps;
 
       vlc = pkgs.vlc;
 
-      # see legacyPackages.<system>.linuxAndFirmware for other versions of 
+      # see legacyPackages.<system>.linuxAndFirmware for other versions of
       # the bundle
       inherit (pkgs.linuxAndFirmware.default)
         linux_rpi5 linuxPackages_rpi5
@@ -209,11 +210,9 @@
 
         users.users.nixos.openssh.authorizedKeys.keys = [
           # YOUR SSH PUB KEY HERE #
-          
         ];
         users.users.root.openssh.authorizedKeys.keys = [
           # YOUR SSH PUB KEY HERE #
-          
         ];
 
         environment.systemPackages = with pkgs; [

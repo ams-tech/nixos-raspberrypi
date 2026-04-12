@@ -8,6 +8,10 @@ final: prev: {
 
   raspberrypi-utils = prev.callPackage ../pkgs/raspberrypi/raspberrypi-utils.nix {};
 
+  rpi-otp-private-key = prev.callPackage ../pkgs/raspberrypi/rpi-otp-private-key.nix {
+    libraspberrypi = final.libraspberrypi;
+  };
+
   rpi-userland = final.libraspberrypi;
 
   rpicam-apps = prev.callPackage ../pkgs/raspberrypi/rpicam-apps.nix {
