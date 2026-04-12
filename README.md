@@ -246,6 +246,77 @@ An alternative ways to consume individual packages without overlays are:
 
 - to get it from `nixos-raspberrypi.legacyPackages.<system>`. Here all overlays are applied.
 
+# OTP-derived secrets
+
+This flake also ships Raspberry Pi OTP-derived secret tooling:
+
+- `rpi-otp-private-key` - reads the Raspberry Pi OTP private key material
+- `rpi-otp-derived-key` - derives deterministic key material from OTP using HKDF-SHA256
+- `nixosModules.rpi-otp-derived-key` - manages derived secrets as systemd services
+
+Supported `rpi-otp-derived-key` output formats are:
+
+- `hex`
+- `binary`
+- `ed25519`
+- `age`
+
+## Module usage
+
+The `rpiOtpDerivedKey` module manages one or more outputs under `services.rpiOtpDerivedKey.secrets.<name>`.
+
+```nix
+{
+  imports = [ nixos-raspberrypi.nixosModules.rpi-otp-derived-key ];
+
+  services.rpiOtpDerivedKey = {
+    enable = true;
+    secrets.my-app = {
+      format = "hex";
+      info = "my-app";
+      owner = "my-service";
+    };
+  };
+}
+```
+
+By default, the module creates a persistent salt on first boot at `/var/lib/rpi-otp-derived-key/salt`. Treat that salt as identity state and back it up if you need derived identities to survive a reinstall or storage replacement.
+
+## Initrd usage
+
+For secrets that must be available in `boot.initrd.systemd`, set `neededForBoot = true`.
+
+```nix
+{
+  imports = [ nixos-raspberrypi.nixosModules.rpi-otp-derived-key ];
+
+  boot.initrd.systemd.enable = true;
+  boot.initrd.secrets."/run/rpi-otp-derived-key/salt" =
+    /persist/secrets/rpi-otp-derived-key-salt;
+
+  services.rpiOtpDerivedKey = {
+    enable = true;
+    generateSalt = false;
+    saltFile = "/run/rpi-otp-derived-key/salt";
+
+    secrets.age = {
+      format = "age";
+      info = "age-identity";
+      path = "/run/age-keys.txt";
+      neededForBoot = true;
+    };
+  };
+}
+```
+
+Notes:
+
+- `neededForBoot` secrets are generated in `boot.initrd.systemd`
+- `neededForBoot` secret paths must stay under `/run`
+- `neededForBoot` secrets must stay owned by `root`
+- keeping the default `/var/lib/...` salt means initrd generation can happen after `sysroot` is mounted
+- if the secret must exist earlier in initrd, set `saltFile` to `/run/...` and provision it with `boot.initrd.secrets`
+
 # Design goals
 
 This is basically [`boot.loader.raspberryPi` options](https://search.nixos.org/options?channel=unstable&show=boot.loader.raspberryPi), which are deprecated in nixpkgs, but updated and improved upon.

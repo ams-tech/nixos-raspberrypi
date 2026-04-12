@@ -38,7 +38,6 @@ let
     pkgs.age
     pkgs.coreutils
     pkgs.openssl
-    pkgs.python3
     pkgs.xxd
   ] ++ defaultOtpHelperPackage;
 

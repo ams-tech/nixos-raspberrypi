@@ -4,7 +4,6 @@
   age,
   coreutils,
   openssl,
-  python3,
   xxd,
   rpiOtpPrivateKey,
 }:
@@ -16,7 +15,6 @@ writeShellApplication {
     age
     coreutils
     openssl
-    python3
     xxd
     rpiOtpPrivateKey
   ];
@@ -103,59 +101,69 @@ EOF
     }
 
     age_identity_from_hex() {
-      python3 - "$1" <<'PY'
-import sys
+      local secret_hex="$1"
+      local charset="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+      local hrp="age-secret-key-"
+      local -a hrp_values=(
+        3 3 3 1 3 3 3 3 3 3 1 3 3 3 1
+        0
+        1 7 5 13 19 5 3 18 5 20 13 11 5 25 13
+      )
+      local -a generators=(0x3b6a57b2 0x26508e6d 0x1ea119fa 0x3d4233dd 0x2a1462b3)
+      local -a values=()
+      local -a checksum_input=()
+      local acc=0
+      local bits=0
+      local max_acc=$(((1 << 12) - 1))
+      local chk=1
+      local i byte value top mod out
 
-CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+      for ((i = 0; i < ''${#secret_hex}; i += 2)); do
+        byte=$((16#''${secret_hex:i:2}))
+        acc=$((((acc << 8) | byte) & max_acc))
+        bits=$((bits + 8))
 
-def polymod(values):
-    chk = 1
-    for value in values:
-        top = chk >> 25
-        chk = ((chk & 0x1FFFFFF) << 5) ^ value
-        for i, gen in enumerate((0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)):
-            if (top >> i) & 1:
-                chk ^= gen
-    return chk
+        while ((bits >= 5)); do
+          bits=$((bits - 5))
+          values+=($(((acc >> bits) & 31)))
+        done
+      done
 
-def hrp_expand(hrp):
-    hrp = hrp.lower()
-    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+      if ((bits > 0)); then
+        values+=($(((acc << (5 - bits)) & 31)))
+      fi
 
-def convertbits(data, frombits, tobits, pad=True):
-    acc = 0
-    bits = 0
-    ret = []
-    maxv = (1 << tobits) - 1
-    max_acc = (1 << (frombits + tobits - 1)) - 1
-    for value in data:
-        if value < 0 or value >> frombits:
-            raise ValueError("invalid data")
-        acc = ((acc << frombits) | value) & max_acc
-        bits += frombits
-        while bits >= tobits:
-            bits -= tobits
-            ret.append((acc >> bits) & maxv)
-    if pad:
-        if bits:
-            ret.append((acc << (tobits - bits)) & maxv)
-    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
-        raise ValueError("invalid padding")
-    return ret
+      checksum_input=(
+        "''${hrp_values[@]}"
+        "''${values[@]}"
+        0 0 0 0 0 0
+      )
 
-def encode(hrp, data):
-    lower = hrp.lower() == hrp
-    hrp = hrp.lower()
-    values = convertbits(data, 8, 5, True)
-    checksum_input = hrp_expand(hrp) + values
-    mod = polymod(checksum_input + [0, 0, 0, 0, 0, 0]) ^ 1
-    checksum = [((mod >> (5 * (5 - i))) & 31) for i in range(6)]
-    out = hrp + "1" + "".join(CHARSET[d] for d in values + checksum)
-    return out if lower else out.upper()
+      for value in "''${checksum_input[@]}"; do
+        top=$((chk >> 25))
+        chk=$((((chk & 0x1ffffff) << 5) ^ value))
 
-raw = bytes.fromhex(sys.argv[1])
-print(encode("AGE-SECRET-KEY-", raw))
-PY
+        for i in 0 1 2 3 4; do
+          if (( (top >> i) & 1 )); then
+            chk=$((chk ^ generators[i]))
+          fi
+        done
+      done
+
+      mod=$((chk ^ 1))
+      out="$hrp"
+      out+="1"
+
+      for value in "''${values[@]}"; do
+        out+="''${charset:value:1}"
+      done
+
+      for ((i = 0; i < 6; i++)); do
+        value=$(((mod >> (5 * (5 - i))) & 31))
+        out+="''${charset:value:1}"
+      done
+
+      printf '%s\n' "''${out^^}"
     }
 
     emit_ed25519_pem() {
