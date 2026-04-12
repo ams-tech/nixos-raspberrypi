@@ -98,6 +98,10 @@ EOF
       xxd -p -c 999999 "$1" | tr -d '\n'
     }
 
+    canonical_hex() {
+      printf '%s' "$1" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]'
+    }
+
     age_identity_from_hex() {
       python3 - "$1" <<'PY'
 import sys
@@ -318,17 +322,19 @@ PY
 
     case "$format" in
       hex)
-        "''${cmd[@]}"
+        derived_hex="$("''${cmd[@]}")"
+        canonical_hex "$derived_hex"
+        printf '\n'
         ;;
       binary)
         "''${cmd[@]}"
         ;;
       ed25519)
-        derived_hex="$("''${cmd[@]}")"
+        derived_hex="$(canonical_hex "$("''${cmd[@]}")")"
         emit_ed25519_pem "$derived_hex"
         ;;
       age)
-        derived_hex="$("''${cmd[@]}")"
+        derived_hex="$(canonical_hex "$("''${cmd[@]}")")"
         emit_age_identity "$derived_hex"
         ;;
     esac

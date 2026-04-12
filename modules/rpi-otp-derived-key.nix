@@ -1,159 +1,175 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  utils,
+  ...
+}:
 let
   cfg = config.services.rpiOtpDerivedKey;
-  requiredOptionsSet = cfg.format != null;
+  users = config.users.users;
+  formats = [
+    "hex"
+    "binary"
+    "ed25519"
+    "age"
+  ];
   isAbsolutePath = path: lib.hasPrefix "/" path;
+  shouldManageTmpfilesDir = dir: !(builtins.elem dir [ "/" "/run" "/tmp" "/var" "/var/lib" ]);
 
-  defaultPackage = let
-    localLibraspberrypi = pkgs.callPackage ../pkgs/raspberrypi/libraspberrypi.nix {};
-    localRpiOtpPrivateKey = pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-private-key.nix {
-      libraspberrypi = localLibraspberrypi;
+  defaultPackage =
+    let
+      localLibraspberrypi = pkgs.callPackage ../pkgs/raspberrypi/libraspberrypi.nix { };
+      localRpiOtpPrivateKey = pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-private-key.nix {
+        libraspberrypi = localLibraspberrypi;
+      };
+    in
+    pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-derived-key.nix {
+      rpiOtpPrivateKey = localRpiOtpPrivateKey;
     };
-  in pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-derived-key.nix {
-    rpiOtpPrivateKey = localRpiOtpPrivateKey;
-  };
 
+  secretType = lib.types.submodule (
+    { config, ... }:
+    {
+      options = {
+        name = lib.mkOption {
+          type = lib.types.str;
+          default = config._module.args.name;
+          description = ''
+            Name of the derived key output.
+          '';
+        };
+
+        format = lib.mkOption {
+          type = lib.types.enum formats;
+          example = "age";
+          description = ''
+            Output format to generate for this secret.
+          '';
+        };
+
+        info = lib.mkOption {
+          type = with lib.types; nullOr str;
+          default = null;
+          example = "ssh-host-key";
+          description = ''
+            Optional public HKDF domain-separation string.
+          '';
+        };
+
+        path = lib.mkOption {
+          type = lib.types.str;
+          default = "/run/rpi-otp-derived-key/${config.name}";
+          description = ''
+            Path where the derived secret is written.
+          '';
+        };
+
+        owner = lib.mkOption {
+          type = with lib.types; nullOr str;
+          default = null;
+          example = "my-service";
+          description = ''
+            Owner of the derived secret. `null` means `root`.
+          '';
+        };
+
+        group = lib.mkOption {
+          type = with lib.types; nullOr str;
+          default =
+            if config.owner != null && builtins.hasAttr config.owner users then
+              users.${config.owner}.group
+            else
+              null;
+          defaultText = lib.literalMD "The owning user's primary group when available, otherwise `root`.";
+          description = ''
+            Group of the derived secret. `null` means `root`.
+          '';
+        };
+
+        mode = lib.mkOption {
+          type = lib.types.str;
+          default = "0400";
+          example = "0440";
+          description = ''
+            File mode to apply to the derived secret.
+          '';
+        };
+
+        wantedBy = lib.mkOption {
+          type = with lib.types; listOf str;
+          default = [ "multi-user.target" ];
+          description = ''
+            Targets that should pull in this derived-secret service.
+          '';
+        };
+
+        before = lib.mkOption {
+          type = with lib.types; listOf str;
+          default = [ ];
+          example = [ "sshd.service" ];
+          description = ''
+            Units that should start after this derived-secret service.
+          '';
+        };
+      };
+    }
+  );
+
+  effectiveSecrets = cfg.secrets;
   saltDir = builtins.dirOf cfg.saltFile;
-  outputDir = builtins.dirOf cfg.outputPath;
-in
-{
-  options.services.rpiOtpDerivedKey = {
-    enable = lib.mkEnableOption "Raspberry Pi OTP-derived key generation service";
 
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs."rpi-otp-derived-key" or defaultPackage;
-      description = ''
-        Package providing the `rpi-otp-derived-key` executable.
-      '';
-    };
+  secretInstances = lib.mapAttrs (
+    name: secretCfg:
+    let
+      outputDir = builtins.dirOf secretCfg.path;
+    in
+    secretCfg
+    // {
+      inherit name outputDir;
+      unitSuffix = utils.escapeSystemdPath name;
+      unitName = "rpi-otp-derived-key-${utils.escapeSystemdPath name}";
+      ownerName = if secretCfg.owner != null then secretCfg.owner else "root";
+      groupName = if secretCfg.group != null then secretCfg.group else "root";
+    }
+  ) effectiveSecrets;
 
-    format = lib.mkOption {
-      type = with lib.types; nullOr (enum [ "hex" "binary" "ed25519" "age" ]);
-      default = null;
-      example = "age";
-      description = ''
-        Output format to generate.
-      '';
-    };
+  managedOutputDirs = lib.unique (
+    lib.filter
+      (dir: shouldManageTmpfilesDir dir && (!cfg.generateSalt || dir != saltDir))
+      (lib.mapAttrsToList (_: secret: secret.outputDir) secretInstances)
+  );
 
-    saltFile = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/rpi-otp-derived-key/salt";
-      example = "/var/lib/rpi-otp-derived-key/salt";
-      description = ''
-        Path to the salt file. By default this is a persistent path under
-        `/var/lib` so the same salt survives reboots and normal OS updates.
-        This file is injected into the service via `systemd`'s
-        `LoadCredential=` mechanism and is not passed as a literal command-line
-        value.
-      '';
-    };
+  tmpfilesRules =
+    lib.optionals (cfg.generateSalt && shouldManageTmpfilesDir saltDir) [
+      "d ${saltDir} 0700 root root - -"
+    ]
+    ++ map (dir: "d ${dir} 0711 root root - -") managedOutputDirs;
 
-    generateSalt = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Generate a random salt file on first boot when `saltFile` does not
-        already exist.
-      '';
-    };
+  secretAssertions = lib.flatten (
+    lib.mapAttrsToList (
+      name: secret:
+      [
+        {
+          assertion = isAbsolutePath secret.path;
+          message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must be an absolute path.";
+        }
+        {
+          assertion = builtins.match "0[0-7]{3}" secret.mode != null;
+          message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.mode must be a four-digit octal string such as \"0400\".";
+        }
+        {
+          assertion = secret.path != cfg.saltFile;
+          message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must not be the same as services.rpiOtpDerivedKey.saltFile.";
+        }
+      ]
+    ) secretInstances
+  );
 
-    saltLength = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 32;
-      description = ''
-        Number of random bytes to generate for a new salt file.
-      '';
-    };
-
-    info = lib.mkOption {
-      type = with lib.types; nullOr str;
-      default = null;
-      example = "ssh-host-key";
-      description = ''
-        Optional public HKDF domain-separation string.
-      '';
-    };
-
-    outputPath = lib.mkOption {
-      type = lib.types.str;
-      default = "/run/rpi-otp-derived-key/key";
-      description = ''
-        Path where the derived key material will be written.
-      '';
-    };
-
-    owner = lib.mkOption {
-      type = lib.types.str;
-      default = "root";
-      description = ''
-        User ownership to apply to the generated key file.
-      '';
-    };
-
-    group = lib.mkOption {
-      type = lib.types.str;
-      default = "root";
-      description = ''
-        Group ownership to apply to the generated key file.
-      '';
-    };
-
-    mode = lib.mkOption {
-      type = lib.types.str;
-      default = "0400";
-      example = "0440";
-      description = ''
-        File mode to apply to the generated key file.
-      '';
-    };
-
-    wantedBy = lib.mkOption {
-      type = with lib.types; listOf str;
-      default = [ "multi-user.target" ];
-      description = ''
-        Targets that should pull in the key generation service.
-      '';
-    };
-
-    before = lib.mkOption {
-      type = with lib.types; listOf str;
-      default = [];
-      example = [ "sshd.service" ];
-      description = ''
-        Units that should start after the key generation service.
-      '';
-    };
-  };
-
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.format != null;
-        message = "services.rpiOtpDerivedKey.format must be set when the module is enabled.";
-      }
-      {
-        assertion = isAbsolutePath cfg.outputPath;
-        message = "services.rpiOtpDerivedKey.outputPath must be an absolute path.";
-      }
-      {
-        assertion = isAbsolutePath cfg.saltFile;
-        message = "services.rpiOtpDerivedKey.saltFile must be an absolute path.";
-      }
-      {
-        assertion = !cfg.generateSalt || !(cfg.saltFile == "/run" || lib.hasPrefix "/run/" cfg.saltFile);
-        message = "services.rpiOtpDerivedKey.saltFile must not point inside /run when services.rpiOtpDerivedKey.generateSalt is enabled.";
-      }
-      {
-        assertion = builtins.match "0[0-7]{3}" cfg.mode != null;
-        message = "services.rpiOtpDerivedKey.mode must be a four-digit octal string such as \"0400\".";
-      }
-    ];
-
-    systemd.services."rpi-otp-derived-key-salt" = lib.mkIf cfg.generateSalt {
+  saltService = lib.optionalAttrs cfg.generateSalt {
+    "rpi-otp-derived-key-salt" = {
       description = "Generate persistent salt for rpi-otp-derived-key";
-      before = [ "rpi-otp-derived-key.service" ];
+      before = lib.mapAttrsToList (_: secret: "${secret.unitName}.service") secretInstances;
       unitConfig = {
         ConditionPathExists = "!${cfg.saltFile}";
         RequiresMountsFor = [ saltDir ];
@@ -191,16 +207,19 @@ in
         trap - EXIT
       '';
     };
+  };
 
-    systemd.services."rpi-otp-derived-key" = lib.mkIf requiredOptionsSet {
-      description = "Generate device-unique key material from Raspberry Pi OTP";
-      wantedBy = cfg.wantedBy;
-      before = cfg.before;
+  secretServices = lib.mapAttrs' (
+    _: secret:
+    lib.nameValuePair secret.unitName {
+      description = "Generate device-unique key material from Raspberry Pi OTP for ${secret.name}";
+      wantedBy = secret.wantedBy;
+      before = secret.before;
       wants = lib.optional cfg.generateSalt "rpi-otp-derived-key-salt.service";
       after = lib.optional cfg.generateSalt "rpi-otp-derived-key-salt.service";
       unitConfig.RequiresMountsFor = lib.unique [
         saltDir
-        outputDir
+        secret.outputDir
       ];
       serviceConfig = {
         Type = "oneshot";
@@ -209,30 +228,30 @@ in
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [ outputDir ];
+        ReadWritePaths = [ secret.outputDir ];
         LoadCredential = [ "salt:${cfg.saltFile}" ];
       };
       script = ''
         set -euo pipefail
 
-        output_dir=${lib.escapeShellArg outputDir}
-        output_path=${lib.escapeShellArg cfg.outputPath}
-        owner=${lib.escapeShellArg cfg.owner}
-        group=${lib.escapeShellArg cfg.group}
-        mode=${lib.escapeShellArg cfg.mode}
+        output_dir=${lib.escapeShellArg secret.outputDir}
+        output_path=${lib.escapeShellArg secret.path}
+        owner=${lib.escapeShellArg secret.ownerName}
+        group=${lib.escapeShellArg secret.groupName}
+        mode=${lib.escapeShellArg secret.mode}
 
         ${pkgs.coreutils}/bin/mkdir -p "$output_dir"
-        tmp_path="$(${pkgs.coreutils}/bin/mktemp "$output_dir/.rpi-otp-derived-key.tmp.XXXXXX")"
+        tmp_path="$(${pkgs.coreutils}/bin/mktemp "$output_dir/.${secret.unitSuffix}.tmp.XXXXXX")"
         trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
 
         cmd=(
           ${lib.getExe cfg.package}
-          --format ${lib.escapeShellArg cfg.format}
+          --format ${lib.escapeShellArg secret.format}
           --salt-file "$CREDENTIALS_DIRECTORY/salt"
         )
 
-        ${lib.optionalString (cfg.info != null) ''
-          cmd+=(--info ${lib.escapeShellArg cfg.info})
+        ${lib.optionalString (secret.info != null) ''
+          cmd+=(--info ${lib.escapeShellArg secret.info})
         ''}
 
         "''${cmd[@]}" > "$tmp_path"
@@ -243,6 +262,81 @@ in
 
         trap - EXIT
       '';
+    }
+  ) secretInstances;
+in
+{
+  options.services.rpiOtpDerivedKey = {
+    enable = lib.mkEnableOption "Raspberry Pi OTP-derived key generation services";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs."rpi-otp-derived-key" or defaultPackage;
+      description = ''
+        Package providing the `rpi-otp-derived-key` executable.
+      '';
     };
+
+    saltFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/rpi-otp-derived-key/salt";
+      example = "/var/lib/rpi-otp-derived-key/salt";
+      description = ''
+        Path to the shared salt file. By default this is a persistent path under
+        `/var/lib` so the same salt survives reboots and normal OS updates.
+        This file is injected into the services via `systemd`'s
+        `LoadCredential=` mechanism and is not passed as a literal command-line
+        value.
+      '';
+    };
+
+    generateSalt = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Generate a random salt file on first boot when `saltFile` does not
+        already exist.
+      '';
+    };
+
+    saltLength = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 32;
+      description = ''
+        Number of random bytes to generate for a new salt file.
+      '';
+    };
+
+    secrets = lib.mkOption {
+      type = with lib.types; attrsOf secretType;
+      default = { };
+      description = ''
+        Derived secrets keyed by name, similar to `sops.secrets`.
+      '';
+    };
+
+  };
+
+  config = lib.mkIf cfg.enable {
+    systemd.tmpfiles.rules = tmpfilesRules;
+
+    assertions =
+      [
+        {
+          assertion = effectiveSecrets != { };
+          message = "services.rpiOtpDerivedKey.enable requires at least one secret in services.rpiOtpDerivedKey.secrets.";
+        }
+        {
+          assertion = isAbsolutePath cfg.saltFile;
+          message = "services.rpiOtpDerivedKey.saltFile must be an absolute path.";
+        }
+        {
+          assertion = !cfg.generateSalt || !(cfg.saltFile == "/run" || lib.hasPrefix "/run/" cfg.saltFile);
+          message = "services.rpiOtpDerivedKey.saltFile must not point inside /run when services.rpiOtpDerivedKey.generateSalt is enabled.";
+        }
+      ]
+      ++ secretAssertions;
+
+    systemd.services = saltService // secretServices;
   };
 }
