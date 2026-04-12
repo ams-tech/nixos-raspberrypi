@@ -154,6 +154,7 @@
 
       raspberrypi-utils = pkgs.raspberrypi-utils;
       raspberrypi-udev-rules = (pkgs.callPackage ./pkgs/raspberrypi/udev-rules.nix {});
+      rpi-otp-derived-key = pkgs.rpi-otp-derived-key;
       rpi-otp-private-key = pkgs.rpi-otp-private-key;
       rpicam-apps = pkgs.rpicam-apps;
 

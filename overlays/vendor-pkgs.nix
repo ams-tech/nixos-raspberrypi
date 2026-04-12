@@ -8,6 +8,10 @@ final: prev: {
 
   raspberrypi-utils = prev.callPackage ../pkgs/raspberrypi/raspberrypi-utils.nix {};
 
+  rpi-otp-derived-key = prev.callPackage ../pkgs/raspberrypi/rpi-otp-derived-key.nix {
+    rpiOtpPrivateKey = final.rpi-otp-private-key;
+  };
+
   rpi-otp-private-key = prev.callPackage ../pkgs/raspberrypi/rpi-otp-private-key.nix {
     libraspberrypi = final.libraspberrypi;
   };
