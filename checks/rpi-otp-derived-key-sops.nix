@@ -2,7 +2,7 @@
 
 let
   mockOtpHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-  mockSaltFile = pkgs.writeText "rpi-otp-derived-key-salt" "integration-test-salt";
+  mockSaltFile = ./fixtures/rpi-otp-derived-key-salt;
 
   # Keep the OTP input deterministic so the derived identities and encrypted
   # SOPS fixture are reproducible across evals and test runs.
@@ -94,6 +94,13 @@ testers.runNixOSTest {
       ];
 
       system.stateVersion = "25.11";
+      boot.initrd.systemd.enable = true;
+      boot.kernelPackages = pkgs.linuxPackages_latest;
+      boot.initrd.secrets."/run/rpi-otp-derived-key/salt" = mockSaltFile;
+      boot.initrd.systemd.storePaths = [
+        pkgs.coreutils
+        pkgs.gnugrep
+      ];
 
       sops = {
         useSystemdActivation = true;
@@ -123,16 +130,21 @@ testers.runNixOSTest {
       services.rpiOtpDerivedKey = {
         enable = true;
         package = derivedKeyPackage;
+        initrdStorePaths = [ mockRpiOtpPrivateKey ];
         generateSalt = false;
-        saltFile = toString mockSaltFile;
+        # Mirror the common initrd pattern: feed the shared salt into /run
+        # through boot.initrd.secrets so the derived key can be generated
+        # during the initrd systemd phase.
+        saltFile = "/run/rpi-otp-derived-key/salt";
         secrets.age = {
-          # This secret is the bridge into sops-nix: it must exist early enough
-          # for sops-install-secrets to use it as its age identity.
+          # Generate the age identity in initrd, then keep using the same
+          # /run/age-keys.txt in stage 2 so sops-nix can decrypt secrets with
+          # no extra provisioning step.
           format = "age";
           info = "age-identity";
           path = "/run/age-keys.txt";
-          wantedBy = lib.mkForce [ "sysinit.target" ];
-          before = [ "sops-install-secrets.service" "sysinit.target" ];
+          neededForBoot = true;
+          before = [ "initrd-otp-consumer.service" ];
         };
         secrets.user-owned = {
           # This second secret checks the per-user ownership and access model.
@@ -142,26 +154,35 @@ testers.runNixOSTest {
         };
       };
 
-      systemd.services.rpi-otp-derived-key-age = {
-        after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
-        unitConfig.DefaultDependencies = lib.mkForce false;
-      };
-
-      systemd.services.sops-install-secrets = {
+      # Prove a boot.initrd.systemd consumer can use the derived key before
+      # switch-root, and leave behind a stamp that stage 2 can verify.
+      boot.initrd.systemd.services.initrd-otp-consumer = {
+        wantedBy = [ "initrd.target" ];
         requires = [ "rpi-otp-derived-key-age.service" ];
         after = [ "rpi-otp-derived-key-age.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          set -euo pipefail
+
+          ${pkgs.gnugrep}/bin/grep -q '^AGE-SECRET-KEY-' /run/age-keys.txt
+          ${pkgs.coreutils}/bin/cp /run/age-keys.txt /run/initrd-derived-age-keys.txt
+        '';
       };
     };
 
   testScript = ''
     start_all()
 
-    machine.wait_for_unit("rpi-otp-derived-key-age.service")
     machine.wait_for_unit("rpi-otp-derived-key-user\\x2downed.service")
     machine.wait_for_unit("sops-install-secrets.service")
     machine.wait_for_unit("sysinit.target")
 
-    # First prove the derived age identity exists and can unlock sops-nix.
+    # First prove initrd systemd consumed the derived key and left it available
+    # for stage 2, then confirm sops-nix can decrypt with that same identity.
+    machine.succeed("cmp /run/age-keys.txt /run/initrd-derived-age-keys.txt")
     machine.succeed("grep -q '^# public key: age1' /run/age-keys.txt")
     machine.succeed("grep -q '^AGE-SECRET-KEY-' /run/age-keys.txt")
     machine.succeed("cat /run/secrets/test_key | grep -q 'test_value'")
