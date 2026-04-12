@@ -291,13 +291,12 @@ For secrets that must be available in `boot.initrd.systemd`, set `neededForBoot 
   imports = [ nixos-raspberrypi.nixosModules.rpi-otp-derived-key ];
 
   boot.initrd.systemd.enable = true;
-  boot.initrd.secrets."/run/rpi-otp-derived-key/salt" =
-    /persist/secrets/rpi-otp-derived-key-salt;
 
   services.rpiOtpDerivedKey = {
     enable = true;
     generateSalt = false;
     saltFile = "/run/rpi-otp-derived-key/salt";
+    initrdSaltSource = /persist/secrets/rpi-otp-derived-key-salt;
 
     secrets.age = {
       format = "age";
@@ -315,7 +314,8 @@ Notes:
 - `neededForBoot` secret paths must stay under `/run`
 - `neededForBoot` secrets must stay owned by `root`
 - keeping the default `/var/lib/...` salt means initrd generation can happen after `sysroot` is mounted
-- if the secret must exist earlier in initrd, set `saltFile` to `/run/...` and provision it with `boot.initrd.secrets`
+- if the secret must exist earlier in initrd, set `saltFile` to `/run/...` and use `initrdSaltSource`
+- if your bootloader does not support native initrd secrets, NixOS will copy `initrdSaltSource` into the initrd payload during build time, so treat that salt as public
 
 # Design goals
 

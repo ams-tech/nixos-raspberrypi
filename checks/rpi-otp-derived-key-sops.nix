@@ -96,7 +96,6 @@ testers.runNixOSTest {
       system.stateVersion = "25.11";
       boot.initrd.systemd.enable = true;
       boot.kernelPackages = pkgs.linuxPackages_latest;
-      boot.initrd.secrets."/run/rpi-otp-derived-key/salt" = mockSaltFile;
       boot.initrd.systemd.storePaths = [
         pkgs.coreutils
         pkgs.gnugrep
@@ -132,10 +131,11 @@ testers.runNixOSTest {
         package = derivedKeyPackage;
         initrdStorePaths = [ mockRpiOtpPrivateKey ];
         generateSalt = false;
-        # Mirror the common initrd pattern: feed the shared salt into /run
-        # through boot.initrd.secrets so the derived key can be generated
-        # during the initrd systemd phase.
         saltFile = "/run/rpi-otp-derived-key/salt";
+        # Mirror the common initrd pattern: have the module project the shared
+        # salt into /run via boot.initrd.secrets so the derived key can be
+        # generated during the initrd systemd phase.
+        initrdSaltSource = mockSaltFile;
         secrets.age = {
           # Generate the age identity in initrd, then keep using the same
           # /run/age-keys.txt in stage 2 so sops-nix can decrypt secrets with

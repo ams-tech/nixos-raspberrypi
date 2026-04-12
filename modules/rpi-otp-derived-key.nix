@@ -90,8 +90,8 @@ let
             With the default persistent `saltFile` under `/var/lib`, initrd
             generation can happen after `sysroot` is mounted. If you need the
             secret before that point, set `saltFile` to a `/run/...` path and
-            provision it into the initrd yourself, for example with
-            `boot.initrd.secrets`.
+            provide `initrdSaltSource` so the module can project that salt into
+            the initrd with `boot.initrd.secrets`.
           '';
         };
 
@@ -150,6 +150,7 @@ let
   effectiveSecrets = cfg.secrets;
   stage2Secrets = lib.filterAttrs (_: secret: !secret.neededForBoot) effectiveSecrets;
   initrdSecrets = lib.filterAttrs (_: secret: secret.neededForBoot) effectiveSecrets;
+  hasInitrdSecrets = initrdSecrets != { };
   saltDir = builtins.dirOf cfg.saltFile;
   initrdSaltFile =
     if isRunPath cfg.saltFile || isStorePath cfg.saltFile then
@@ -404,8 +405,25 @@ in
         When any secret uses `neededForBoot`, keeping the default `/var/lib`
         path means initrd generation can happen after `sysroot` is mounted.
         For secrets that must exist earlier in initrd, point this at a
-        `/run/...` path and provision that file via `boot.initrd.secrets` or a
-        comparable initrd mechanism.
+        `/run/...` path and set `initrdSaltSource` so the module can expose the
+        same salt through `boot.initrd.secrets`.
+      '';
+    };
+
+    initrdSaltSource = lib.mkOption {
+      type = with lib.types; nullOr path;
+      default = null;
+      example = "/persist/secrets/rpi-otp-derived-key-salt";
+      description = ''
+        Source file to project into the initrd via `boot.initrd.secrets` at
+        `saltFile`.
+
+        This is the recommended way to supply a shared salt before `sysroot` is
+        mounted when any secret uses `neededForBoot = true`.
+
+        Keep `saltFile` under `/run` when using this option. Also note that if
+        the selected bootloader does not support native initrd secrets, NixOS
+        will copy this source file into the initrd payload during build time.
       '';
     };
 
@@ -458,15 +476,34 @@ in
           message = "services.rpiOtpDerivedKey.saltFile must not point inside /run when services.rpiOtpDerivedKey.generateSalt is enabled.";
         }
         {
-          assertion = initrdSecrets == { } || config.boot.initrd.systemd.enable;
+          assertion = cfg.initrdSaltSource == null || isRunPath cfg.saltFile;
+          message = "services.rpiOtpDerivedKey.saltFile must point inside /run when services.rpiOtpDerivedKey.initrdSaltSource is set.";
+        }
+        {
+          assertion = cfg.initrdSaltSource == null || !cfg.generateSalt;
+          message = "services.rpiOtpDerivedKey.generateSalt must be false when services.rpiOtpDerivedKey.initrdSaltSource is set.";
+        }
+        {
+          assertion = !hasInitrdSecrets || config.boot.initrd.systemd.enable;
           message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot requires boot.initrd.systemd.enable = true.";
         }
       ]
       ++ secretAssertions;
 
+    warnings = lib.optional (cfg.initrdSaltSource != null && !config.boot.loader.supportsInitrdSecrets) ''
+      services.rpiOtpDerivedKey.initrdSaltSource uses boot.initrd.secrets, but the
+      current bootloader does not support native initrd secrets. NixOS will copy
+      the salt source into the initrd payload during build time, so treat that
+      salt as public or use a different early-boot provisioning mechanism.
+    '';
+
     systemd.services = stage2SaltService // stage2SecretServices;
 
-    boot.initrd.systemd = lib.mkIf (initrdSecrets != { }) {
+    boot.initrd.secrets = lib.mkIf (cfg.initrdSaltSource != null) {
+      "${cfg.saltFile}" = cfg.initrdSaltSource;
+    };
+
+    boot.initrd.systemd = lib.mkIf hasInitrdSecrets {
       initrdBin = defaultInitrdPackages ++ cfg.initrdStorePaths;
       storePaths =
         map (source: { inherit source; }) (
