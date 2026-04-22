@@ -9,30 +9,30 @@ let
   mockRpiOtpPrivateKey = pkgs.writeShellApplication {
     name = "rpi-otp-private-key";
     text = ''
-      set -euo pipefail
+            set -euo pipefail
 
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          -l|-o)
-            shift 2
-            ;;
-          -h|--help)
-            cat <<'EOF'
-Usage: rpi-otp-private-key [-l WORDS] [-o OFFSET]
-EOF
-            exit 0
-            ;;
-          --)
-            shift
-            break
-            ;;
-          *)
-            shift
-            ;;
-        esac
-      done
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                -l|-o)
+                  shift 2
+                  ;;
+                -h|--help)
+                  cat <<'EOF'
+      Usage: rpi-otp-private-key [-l WORDS] [-o OFFSET]
+      EOF
+                  exit 0
+                  ;;
+                --)
+                  shift
+                  break
+                  ;;
+                *)
+                  shift
+                  ;;
+              esac
+            done
 
-      printf '%s\n' '${mockOtpHex}'
+            printf '%s\n' '${mockOtpHex}'
     '';
   };
 
@@ -47,46 +47,46 @@ EOF
 
   # Encrypt the fixture with the same derived age identity that the module
   # will regenerate inside the VM.
-  generatedSopsFile = pkgs.runCommand "rpi-otp-derived-key-sops-secrets.yaml" {
-    nativeBuildInputs = [
-      derivedKeyPackage
-      pkgs.sops
-    ];
-  } ''
-    set -euo pipefail
+  generatedSopsFile = pkgs.runCommand "rpi-otp-derived-key-sops-secrets.yaml"
+    {
+      nativeBuildInputs = [
+        derivedKeyPackage
+        pkgs.sops
+      ];
+    } ''
+        set -euo pipefail
 
-    identity_file="$PWD/identity.txt"
-    plaintext_file="$PWD/secrets.yaml"
+        identity_file="$PWD/identity.txt"
+        plaintext_file="$PWD/secrets.yaml"
 
-    rpi-otp-derived-key \
-      --format age \
-      --salt-file ${mockSaltFile} \
-      --info age-identity \
-      > "$identity_file"
+        rpi-otp-derived-key \
+          --format age \
+          --salt-file ${mockSaltFile} \
+          > "$identity_file"
 
-    public_key="$(sed -n 's/^# public key: //p' "$identity_file")"
-    test -n "$public_key"
+        public_key="$(sed -n 's/^# public key: //p' "$identity_file")"
+        test -n "$public_key"
 
-    cat > "$plaintext_file" <<'EOF'
-test_key: test_value
-nested:
-  test:
-    file: another value
-EOF
+        cat > "$plaintext_file" <<'EOF'
+    test_key: test_value
+    nested:
+      test:
+        file: another value
+    EOF
 
-    SOPS_AGE_KEY_FILE="$identity_file" \
-      sops --encrypt \
-      --age "$public_key" \
-      --input-type yaml \
-      --output-type yaml \
-      "$plaintext_file" > "$out"
+        SOPS_AGE_KEY_FILE="$identity_file" \
+          sops --encrypt \
+          --age "$public_key" \
+          --input-type yaml \
+          --output-type yaml \
+          "$plaintext_file" > "$out"
   '';
 in
 testers.runNixOSTest {
   name = "rpi-otp-derived-key-sops-nix";
 
-  nodes.machine =
-    { config, lib, ... }:
+  nodes.initrd =
+    { config, ... }:
     {
       imports = [
         sops-nix.nixosModules.sops
@@ -141,7 +141,6 @@ testers.runNixOSTest {
           # /run/age-keys.txt in stage 2 so sops-nix can decrypt secrets with
           # no extra provisioning step.
           format = "age";
-          info = "age-identity";
           path = "/run/age-keys.txt";
           neededForBoot = true;
           before = [ "initrd-otp-consumer.service" ];
@@ -149,7 +148,6 @@ testers.runNixOSTest {
         secrets.user-owned = {
           # This second secret checks the per-user ownership and access model.
           format = "hex";
-          info = "user-owned";
           owner = "alice";
         };
       };
@@ -173,24 +171,119 @@ testers.runNixOSTest {
       };
     };
 
+  nodes.stage2 =
+    { config, lib, ... }:
+    {
+      imports = [
+        sops-nix.nixosModules.sops
+        self.nixosModules.rpi-otp-derived-key
+      ];
+
+      system.stateVersion = "25.11";
+
+      sops = {
+        useSystemdActivation = true;
+        validateSopsFiles = false;
+        defaultSopsFile = generatedSopsFile;
+        defaultSopsFormat = "yaml";
+        age.keyFile = config.services.rpiOtpDerivedKey.secrets.age.path;
+        secrets.test_key = { };
+        secrets."nested/test/file" = { };
+      };
+
+      users.groups.alice = { };
+      users.users.alice = {
+        isSystemUser = true;
+        group = "alice";
+      };
+
+      users.groups.bob = { };
+      users.users.bob = {
+        isSystemUser = true;
+        group = "bob";
+      };
+
+      services.rpiOtpDerivedKey = {
+        enable = true;
+        package = derivedKeyPackage;
+        secrets.age = {
+          format = "age";
+          path = "/run/age-keys.txt";
+        };
+        secrets.user-owned = {
+          format = "hex";
+          owner = "alice";
+          path = "/var/lib/rpi-otp-derived-key/user-owned";
+        };
+      };
+
+      systemd.services.sops-install-secrets.after = [ "rpi-otp-derived-key-age.service" ];
+
+      systemd.services.rpi-otp-derived-key-salt.script = lib.mkForce ''
+        set -euo pipefail
+
+        salt_dir=/var/lib/rpi-otp-derived-key
+        salt_path=/var/lib/rpi-otp-derived-key/salt
+
+        ${pkgs.coreutils}/bin/mkdir -p "$salt_dir"
+
+        if [[ -e "$salt_path" ]]; then
+          exit 0
+        fi
+
+        tmp_path="$(${pkgs.coreutils}/bin/mktemp "$salt_dir/.rpi-otp-derived-key-salt.tmp.XXXXXX")"
+        trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
+
+        ${pkgs.coreutils}/bin/cp ${mockSaltFile} "$tmp_path"
+
+        ${pkgs.coreutils}/bin/chown root:root "$tmp_path"
+        ${pkgs.coreutils}/bin/chmod 0400 "$tmp_path"
+        ${pkgs.coreutils}/bin/mv -f "$tmp_path" "$salt_path"
+
+        trap - EXIT
+      '';
+    };
+
   testScript = ''
     start_all()
 
-    machine.wait_for_unit("rpi-otp-derived-key-user\\x2downed.service")
-    machine.wait_for_unit("sops-install-secrets.service")
-    machine.wait_for_unit("sysinit.target")
+    initrd.wait_for_unit("rpi-otp-derived-key-user\\x2downed.service")
+    initrd.wait_for_unit("sops-install-secrets.service")
+    initrd.wait_for_unit("sysinit.target")
 
     # First prove initrd systemd consumed the derived key and left it available
     # for stage 2, then confirm sops-nix can decrypt with that same identity.
-    machine.succeed("cmp /run/age-keys.txt /run/initrd-derived-age-keys.txt")
-    machine.succeed("grep -q '^# public key: age1' /run/age-keys.txt")
-    machine.succeed("grep -q '^AGE-SECRET-KEY-' /run/age-keys.txt")
-    machine.succeed("cat /run/secrets/test_key | grep -q 'test_value'")
-    machine.succeed("cat /run/secrets/nested/test/file | grep -q 'another value'")
+    initrd.succeed("cmp /run/age-keys.txt /run/initrd-derived-age-keys.txt")
+    initrd.succeed("grep -q '^# public key: age1' /run/age-keys.txt")
+    initrd.succeed("grep -q '^AGE-SECRET-KEY-' /run/age-keys.txt")
+    initrd.succeed("cat /run/secrets/test_key | grep -q 'test_value'")
+    initrd.succeed("cat /run/secrets/nested/test/file | grep -q 'another value'")
 
     # Then prove per-secret ownership is enforced for non-root users.
-    machine.succeed("stat -c '%U %G %a' /run/rpi-otp-derived-key/user-owned | grep -q '^alice alice 400$'")
-    machine.succeed("su -s /bin/sh alice -c 'cat /run/rpi-otp-derived-key/user-owned >/dev/null'")
-    machine.fail("su -s /bin/sh bob -c 'cat /run/rpi-otp-derived-key/user-owned >/dev/null'")
+    initrd.succeed("stat -c '%U %G %a' /run/rpi-otp-derived-key/user-owned | grep -q '^alice alice 400$'")
+    initrd.succeed("su -s /bin/sh alice -c 'cat /run/rpi-otp-derived-key/user-owned >/dev/null'")
+    initrd.fail("su -s /bin/sh bob -c 'cat /run/rpi-otp-derived-key/user-owned >/dev/null'")
+
+    stage2.wait_for_unit("rpi-otp-derived-key-age.service")
+    stage2.wait_for_unit("sops-install-secrets.service")
+    stage2.wait_for_unit("sysinit.target")
+
+    # Prove a consumer can order itself after the derived age identity, even
+    # when the salt is created on first boot under /var/lib.
+    stage2.succeed("systemctl show -P After sops-install-secrets.service | tr ' ' '\\n' | grep -qx 'rpi-otp-derived-key-age.service'")
+    stage2.succeed("grep -q '^# public key: age1' /run/age-keys.txt")
+    stage2.succeed("grep -q '^AGE-SECRET-KEY-' /run/age-keys.txt")
+    stage2.succeed("cat /run/secrets/test_key | grep -q 'test_value'")
+    stage2.succeed("cat /run/secrets/nested/test/file | grep -q 'another value'")
+
+    # The managed salt directory becomes traversable when it also hosts a
+    # non-root-readable derived secret, while the salt itself stays root-only.
+    stage2.succeed("stat -c '%a %U %G' /var/lib/rpi-otp-derived-key | grep -qx '711 root root'")
+    stage2.succeed("stat -c '%a %U %G' /var/lib/rpi-otp-derived-key/salt | grep -qx '400 root root'")
+    stage2.succeed("stat -c '%U %G %a' /var/lib/rpi-otp-derived-key/user-owned | grep -q '^alice alice 400$'")
+    stage2.succeed("su -s /bin/sh alice -c 'cat /var/lib/rpi-otp-derived-key/user-owned >/dev/null'")
+    stage2.fail("su -s /bin/sh bob -c 'cat /var/lib/rpi-otp-derived-key/user-owned >/dev/null'")
+    stage2.fail("su -s /bin/sh alice -c 'cat /var/lib/rpi-otp-derived-key/salt >/dev/null'")
+    stage2.fail("su -s /bin/sh bob -c 'cat /var/lib/rpi-otp-derived-key/salt >/dev/null'")
   '';
 }

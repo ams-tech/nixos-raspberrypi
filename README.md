@@ -265,6 +265,8 @@ Supported `rpi-otp-derived-key` output formats are:
 
 The `rpiOtpDerivedKey` module manages one or more outputs under `services.rpiOtpDerivedKey.secrets.<name>`.
 
+The attribute name is the secret identity: it determines the default output path under `/run/rpi-otp-derived-key/` and the matching `rpi-otp-derived-key-<name>.service` unit name unless you override `path`.
+
 ```nix
 {
   imports = [ nixos-raspberrypi.nixosModules.rpi-otp-derived-key ];
@@ -273,7 +275,6 @@ The `rpiOtpDerivedKey` module manages one or more outputs under `services.rpiOtp
     enable = true;
     secrets.my-app = {
       format = "hex";
-      info = "my-app";
       owner = "my-service";
     };
   };
@@ -281,6 +282,10 @@ The `rpiOtpDerivedKey` module manages one or more outputs under `services.rpiOtp
 ```
 
 By default, the module creates a persistent salt on first boot at `/var/lib/rpi-otp-derived-key/salt`. Treat that salt as identity state and back it up if you need derived identities to survive a reinstall or storage replacement.
+
+Stage-2 secrets default to `sysinit.target`, so they are available to early boot consumers instead of waiting for `multi-user.target`.
+
+If you place a non-root-readable derived secret under the managed salt directory, the directory becomes traversable (`0711`) so the secret stays reachable. The salt file itself remains `0400 root:root`.
 
 ## Initrd usage
 
@@ -300,7 +305,6 @@ For secrets that must be available in `boot.initrd.systemd`, set `neededForBoot 
 
     secrets.age = {
       format = "age";
-      info = "age-identity";
       path = "/run/age-keys.txt";
       neededForBoot = true;
     };
@@ -313,6 +317,7 @@ Notes:
 - `neededForBoot` secrets are generated in `boot.initrd.systemd`
 - `neededForBoot` secret paths must stay under `/run`
 - `neededForBoot` secrets must stay owned by `root`
+- stage-2 secrets default to `sysinit.target`; consumers that need a derived secret during stage 2 should order themselves after the matching `rpi-otp-derived-key-<name>.service`
 - keeping the default `/var/lib/...` salt means initrd generation can happen after `sysroot` is mounted
 - if the secret must exist earlier in initrd, set `saltFile` to `/run/...` and use `initrdSaltSource`
 - if your bootloader does not support native initrd secrets, NixOS will copy `initrdSaltSource` into the initrd payload during build time, so treat that salt as public
