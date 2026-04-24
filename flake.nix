@@ -29,15 +29,10 @@
       inputs.nixos-unstable.follows = "nixpkgs";
     };
 
-    sops-nix = {
-      url = "github:Mic92/sops-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     flake-compat.url = "github:edolstra/flake-compat";
   };
 
-  outputs = { self, nixpkgs, argononed, nixos-images, sops-nix, ... }@inputs: let
+  outputs = { self, nixpkgs, argononed, nixos-images, ... }@inputs: let
     rpiSystems = [ "aarch64-linux" "armv7l-linux" "armv6l-linux" ];
     checkSystems = [ "x86_64-linux" ];
     allSystems = nixpkgs.lib.systems.flakeExposed;
@@ -79,7 +74,7 @@
     } // inputs);
 
     checks = import ./checks {
-      inherit self nixpkgs sops-nix;
+      inherit self nixpkgs;
       systems = checkSystems;
     };
 
