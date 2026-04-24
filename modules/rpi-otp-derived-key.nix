@@ -26,6 +26,7 @@ let
   fileModeType = lib.types.strMatching "0[0-7]{3}";
   managedSaltLength = 32;
   modulePackage = pkgs.rpi-otp-derived-key;
+  otpHelperPackage = pkgs.rpi-otp-private-key;
   defaultOtpHelperPackage = lib.optional
     (
       builtins.elem pkgs.stdenv.hostPlatform.system [
@@ -188,6 +189,28 @@ let
   initrdBootSecrets = lib.mapAttrs'
     (_: secret: lib.nameValuePair secret.initrdSaltPath secret.persistentSaltPath)
     initrdSecretInstances;
+  installOtpCheckHook =
+    if cfg.enable then
+      pkgs.writeShellScript "rpi-otp-derived-key-check-otp" ''
+        set -euo pipefail
+
+        if ! ${lib.getExe otpHelperPackage} -c; then
+          cat >&2 <<'EOF'
+services.rpiOtpDerivedKey: Raspberry Pi OTP private key is not programmed.
+
+Program the OTP private key before installing OTP-derived secrets. One supported flow is:
+
+  openssl ecparam -name prime256v1 -genkey -noout -out private_key.pem
+  openssl ec -in private_key.pem -text -noout | awk '/priv:/{flag=1; next} /pub:/{flag=0} flag' | tr -d ' \n:' | head -n1 > d.hex
+  rpi-otp-private-key -w "$(cat d.hex)"
+
+Run `rpi-otp-private-key -h` for details and warnings. Aborting bootloader install.
+EOF
+          exit 1
+        fi
+      ''
+    else
+      null;
   installSaltHook =
     if hasInitrdSecrets then
       pkgs.writeShellScript "rpi-otp-derived-key-install-salt" (
@@ -387,9 +410,14 @@ in
       ]
       ++ secretAssertions;
 
-    system.build.rpiOtpDerivedKeyInstallSaltHook = lib.mkIf (
-      hasInitrdSecrets && raspberryPiBootloaderEnabled
-    ) installSaltHook;
+    system.build.rpiOtpDerivedKeyInstallHooks = lib.mkIf (
+      raspberryPiBootloaderEnabled
+    ) (
+      lib.filter (hook: hook != null) [
+        installOtpCheckHook
+        installSaltHook
+      ]
+    );
 
     systemd.services = stage2SaltServices // stage2SecretServices;
 

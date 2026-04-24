@@ -11,15 +11,27 @@ let
     text = ''
       set -euo pipefail
 
+      otp_hex='${mockOtpHex}'
+
       while [[ $# -gt 0 ]]; do
         case "$1" in
+          -c)
+            if [[ "$otp_hex" =~ ^0+$ ]]; then
+              exit 1
+            fi
+            exit 0
+            ;;
           -l|-o)
             shift 2
             ;;
+          -w)
+            shift 2
+            exit 0
+            ;;
           -h|--help)
             cat <<'EOF'
-      Usage: rpi-otp-private-key [-l WORDS] [-o OFFSET]
-      EOF
+Usage: rpi-otp-private-key [-c] [-w KEY] [-l WORDS] [-o OFFSET]
+EOF
             exit 0
             ;;
           --)
@@ -32,7 +44,7 @@ let
         esac
       done
 
-      printf '%s\n' '${mockOtpHex}'
+      printf '%s\n' "$otp_hex"
     '';
   };
 

@@ -14,6 +14,9 @@ in
   rpi-otp-derived-key-install-time-salt = pkgs.callPackage ./rpi-otp-derived-key-install-time-salt.nix {
     inherit self;
   };
+  rpi-otp-derived-key-install-time-otp-check = pkgs.callPackage ./rpi-otp-derived-key-install-time-otp-check.nix {
+    inherit self;
+  };
   rpi-otp-derived-key-sops-nix = pkgs.callPackage ./rpi-otp-derived-key-sops.nix {
     inherit self sops-nix;
   };

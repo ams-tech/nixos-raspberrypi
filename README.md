@@ -287,6 +287,8 @@ By default, the module creates one persistent salt per secret under `/var/lib/rp
 
 Stage-2 secrets default to `sysinit.target`, so they are available to early boot consumers instead of waiting for `multi-user.target`.
 
+On `boot.loader.raspberry-pi`, bootloader installation also checks that the Raspberry Pi OTP private key is already programmed whenever OTP-derived secrets are enabled. If the OTP key is still blank, installation fails early with a `rpi-otp-private-key -w ...` hint instead of deferring the failure until the first secret-generation service runs.
+
 ## Initrd usage
 
 For secrets that must be available in `boot.initrd.systemd`, set `neededForBoot = true`.
@@ -316,6 +318,7 @@ Notes:
 - stage-2 secrets default to `sysinit.target`; consumers that need a derived secret during stage 2 should order themselves after the matching `rpi-otp-derived-key-<name>.service`, or use `secrets.<name>.before` to push specific units behind it
 - each secret gets its own persistent salt under `/var/lib/rpi-otp-derived-key/salt/`
 - `neededForBoot` is currently supported only on `boot.loader.raspberry-pi`, where the module provisions each initrd secret's salt automatically during `nixos-install` / `switch-to-configuration boot`
+- on `boot.loader.raspberry-pi`, `nixos-install` / `switch-to-configuration boot` also checks that the OTP private key is programmed and aborts early with a provisioning hint if it is still all zeros
 - renaming `secrets.<name>` rotates that secret because the secret name is part of the module-managed salt identity
 
 # Design goals

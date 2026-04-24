@@ -3,8 +3,8 @@
 let
   cfg = config.boot.loader.raspberry-pi;
   isAarch64 = pkgs.stdenv.hostPlatform.isAarch64;
-  otpInstallSaltHook = lib.attrByPath [ "system" "build" "rpiOtpDerivedKeyInstallSaltHook" ] null config;
-  preInstallHooks = cfg.preInstallHooks ++ lib.optional (otpInstallSaltHook != null) otpInstallSaltHook;
+  otpInstallHooks = lib.attrByPath [ "system" "build" "rpiOtpDerivedKeyInstallHooks" ] [ ] config;
+  preInstallHooks = cfg.preInstallHooks ++ otpInstallHooks;
 
   ubootBinName = if isAarch64 then "u-boot-rpi-arm64.bin" else "u-boot-rpi.bin";
 
