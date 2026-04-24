@@ -265,7 +265,9 @@ Supported `rpi-otp-derived-key` output formats are:
 
 The `rpiOtpDerivedKey` module manages one or more outputs under `services.rpiOtpDerivedKey.secrets.<name>`.
 
-The attribute name is the secret identity: it determines the default output path under `/run/rpi-otp-derived-key/` and the matching `rpi-otp-derived-key-<name>.service` unit name unless you override `path`.
+The attribute name is the secret identity: it determines the default output path under `/run/rpi-otp-derived-key/`, the matching `rpi-otp-derived-key-<name>.service` unit name, and the module-managed per-secret salt state. Renaming `secrets.<name>` rotates that derived secret.
+
+The module manages its implementation and salt storage internally. `services.rpiOtpDerivedKey` no longer exposes package, salt length, salt path, or salt source options.
 
 ```nix
 {
@@ -281,11 +283,9 @@ The attribute name is the secret identity: it determines the default output path
 }
 ```
 
-By default, the module creates a persistent salt on first boot at `/var/lib/rpi-otp-derived-key/salt`. Treat that salt as identity state and back it up if you need derived identities to survive a reinstall or storage replacement.
+By default, the module creates one persistent salt per secret under `/var/lib/rpi-otp-derived-key/salt/`. Treat that directory as identity state and back it up if you need derived identities to survive a reinstall or storage replacement. Secret names that are not safe path components are hashed for the internal salt filename, so the on-disk salt name may differ from `secrets.<name>`.
 
 Stage-2 secrets default to `sysinit.target`, so they are available to early boot consumers instead of waiting for `multi-user.target`.
-
-If you place a non-root-readable derived secret under the managed salt directory, the directory becomes traversable (`0711`) so the secret stays reachable. The salt file itself remains `0400 root:root`.
 
 ## Initrd usage
 
@@ -299,10 +299,6 @@ For secrets that must be available in `boot.initrd.systemd`, set `neededForBoot 
 
   services.rpiOtpDerivedKey = {
     enable = true;
-    generateSalt = false;
-    saltFile = "/run/rpi-otp-derived-key/salt";
-    initrdSaltSource = /persist/secrets/rpi-otp-derived-key-salt;
-
     secrets.age = {
       format = "age";
       path = "/run/age-keys.txt";
@@ -317,10 +313,10 @@ Notes:
 - `neededForBoot` secrets are generated in `boot.initrd.systemd`
 - `neededForBoot` secret paths must stay under `/run`
 - `neededForBoot` secrets must stay owned by `root`
-- stage-2 secrets default to `sysinit.target`; consumers that need a derived secret during stage 2 should order themselves after the matching `rpi-otp-derived-key-<name>.service`
-- keeping the default `/var/lib/...` salt means initrd generation can happen after `sysroot` is mounted
-- if the secret must exist earlier in initrd, set `saltFile` to `/run/...` and use `initrdSaltSource`
-- if your bootloader does not support native initrd secrets, NixOS will copy `initrdSaltSource` into the initrd payload during build time, so treat that salt as public
+- stage-2 secrets default to `sysinit.target`; consumers that need a derived secret during stage 2 should order themselves after the matching `rpi-otp-derived-key-<name>.service`, or use `secrets.<name>.before` to push specific units behind it
+- each secret gets its own persistent salt under `/var/lib/rpi-otp-derived-key/salt/`
+- `neededForBoot` is currently supported only on `boot.loader.raspberry-pi`, where the module provisions each initrd secret's salt automatically during `nixos-install` / `switch-to-configuration boot`
+- renaming `secrets.<name>` rotates that secret because the secret name is part of the module-managed salt identity
 
 # Design goals
 

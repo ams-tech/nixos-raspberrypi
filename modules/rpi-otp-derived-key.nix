@@ -7,30 +7,25 @@
 let
   cfg = config.services.rpiOtpDerivedKey;
   users = config.users.users;
+  otpDerivedKeyLib = import ../lib/rpi-otp-derived-key.nix { };
+  raspberryPiBootloaderEnabled = lib.attrByPath [ "boot" "loader" "raspberry-pi" "enable" ] false config;
   formats = [
     "hex"
     "binary"
     "ed25519"
     "age"
   ];
-  storeDir = builtins.storeDir;
   isAbsolutePath = path: lib.hasPrefix "/" path;
   isRunPath = path: path == "/run" || lib.hasPrefix "/run/" path;
-  isStorePath = path: path == storeDir || lib.hasPrefix "${storeDir}/" path;
   isPathAtOrBelowDir = dir: path: path == dir || lib.hasPrefix "${dir}/" path;
   shouldManageTmpfilesDir = dir: !(builtins.elem dir [ "/" "/run" "/tmp" "/var" "/var/lib" ]);
-  modeDigitAllowsRead = digit: builtins.elem digit [ "4" "5" "6" "7" ];
-  modeOwnerAllowsRead = mode: modeDigitAllowsRead (builtins.substring 1 1 mode);
-  modeGroupAllowsRead = mode: modeDigitAllowsRead (builtins.substring 2 1 mode);
-  modeOtherAllowsRead = mode: modeDigitAllowsRead (builtins.substring 3 1 mode);
-
-  defaultLibraspberrypi = pkgs.callPackage ../pkgs/raspberrypi/libraspberrypi.nix { };
-  defaultRpiOtpPrivateKey = pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-private-key.nix {
-    libraspberrypi = defaultLibraspberrypi;
+  absolutePathType = (lib.types.addCheck lib.types.str isAbsolutePath) // {
+    description = "absolute path";
+    name = "absolute path";
   };
-  defaultPackage = pkgs.callPackage ../pkgs/raspberrypi/rpi-otp-derived-key.nix {
-    rpiOtpPrivateKey = defaultRpiOtpPrivateKey;
-  };
+  fileModeType = lib.types.strMatching "0[0-7]{3}";
+  managedSaltLength = 32;
+  modulePackage = pkgs.rpi-otp-derived-key;
   defaultOtpHelperPackage = lib.optional
     (
       builtins.elem pkgs.stdenv.hostPlatform.system [
@@ -39,7 +34,7 @@ let
         "aarch64-linux"
       ]
     )
-    (pkgs."rpi-otp-private-key" or defaultRpiOtpPrivateKey);
+    pkgs.rpi-otp-private-key;
   defaultInitrdPackages = [
     pkgs.age
     pkgs.coreutils
@@ -60,7 +55,7 @@ let
         };
 
         path = lib.mkOption {
-          type = lib.types.str;
+          type = absolutePathType;
           default = "/run/rpi-otp-derived-key/${config._module.args.name}";
           description = ''
             Path where the derived secret is written.
@@ -74,13 +69,10 @@ let
           description = ''
             Generate this secret in `boot.initrd.systemd` instead of stage 2.
             This is useful for consumers that need the derived secret during the
-            systemd initrd phase.
-
-            With the default persistent `saltFile` under `/var/lib`, initrd
-            generation can happen after `sysroot` is mounted. If you need the
-            secret before that point, set `saltFile` to a `/run/...` path and
-            provide `initrdSaltSource` so the module can project that salt into
-            the initrd with `boot.initrd.secrets`.
+            systemd initrd phase. The module automatically provisions a
+            persistent per-secret salt for initrd use during
+            `switch-to-configuration boot` (including `nixos-install`) on
+            Raspberry Pi bootloaders.
           '';
         };
 
@@ -107,21 +99,11 @@ let
         };
 
         mode = lib.mkOption {
-          type = lib.types.str;
+          type = fileModeType;
           default = "0400";
           example = "0440";
           description = ''
             File mode to apply to the derived secret.
-          '';
-        };
-
-        wantedBy = lib.mkOption {
-          type = with lib.types; listOf str;
-          default = if config.neededForBoot then [ "initrd.target" ] else [ "sysinit.target" ];
-          description = ''
-            Targets that should pull in this derived-secret service in the
-            relevant systemd stage. Stage-2 secrets default to `sysinit.target`
-            so they are available for early boot consumers.
           '';
         };
 
@@ -133,20 +115,49 @@ let
             Units that should start after this derived-secret service.
           '';
         };
+
       };
     }
   );
 
-  effectiveSecrets = cfg.secrets;
-  stage2Secrets = lib.filterAttrs (_: secret: !secret.neededForBoot) effectiveSecrets;
-  initrdSecrets = lib.filterAttrs (_: secret: secret.neededForBoot) effectiveSecrets;
+  stage2Secrets = lib.filterAttrs (_: secret: !secret.neededForBoot) cfg.secrets;
+  initrdSecrets = lib.filterAttrs (_: secret: secret.neededForBoot) cfg.secrets;
   hasInitrdSecrets = initrdSecrets != { };
-  saltDir = builtins.dirOf cfg.saltFile;
-  initrdSaltFile =
-    if isRunPath cfg.saltFile || isStorePath cfg.saltFile then
-      cfg.saltFile
-    else
-      "/sysroot${cfg.saltFile}";
+  saltStateDir = "/var/lib/rpi-otp-derived-key/salt";
+  initrdSaltDir = "/run/rpi-otp-derived-key/salt";
+  initrdServiceStorePaths = lib.unique (
+    [
+      modulePackage
+    ]
+    ++ defaultInitrdPackages
+  );
+  mkRandomSaltCreationSnippet =
+    saltPath: ''
+      salt_dir=${lib.escapeShellArg (builtins.dirOf saltPath)}
+      salt_path=${lib.escapeShellArg saltPath}
+
+      ${pkgs.coreutils}/bin/mkdir -p "$salt_dir"
+
+      if [[ -e "$salt_path" ]]; then
+        :
+      else
+        tmp_path="$(${pkgs.coreutils}/bin/mktemp "$salt_dir/.rpi-otp-derived-key-salt.tmp.XXXXXX")"
+        trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
+
+        ${pkgs.openssl}/bin/openssl rand -out "$tmp_path" "${toString managedSaltLength}"
+
+        ${pkgs.coreutils}/bin/chown root:root "$tmp_path"
+        ${pkgs.coreutils}/bin/chmod 0400 "$tmp_path"
+        ${pkgs.coreutils}/bin/mv -f "$tmp_path" "$salt_path"
+
+        trap - EXIT
+      fi
+    '';
+  mkRandomSaltCreationScript =
+    saltPaths: ''
+      set -euo pipefail
+      ${lib.concatMapStringsSep "\n" mkRandomSaltCreationSnippet saltPaths}
+    '';
 
   mkSecretInstances =
     secrets:
@@ -154,15 +165,19 @@ let
       (
         name: secretCfg:
         let
+          unitSuffix = utils.escapeSystemdPath name;
+          saltPathComponent = otpDerivedKeyLib.saltPathComponentForName name;
           outputDir = builtins.dirOf secretCfg.path;
         in
         secretCfg
         // {
-          inherit name outputDir;
-          unitSuffix = utils.escapeSystemdPath name;
-          unitName = "rpi-otp-derived-key-${utils.escapeSystemdPath name}";
+          inherit name outputDir saltPathComponent unitSuffix;
+          unitName = "rpi-otp-derived-key-${unitSuffix}";
+          saltUnitName = "rpi-otp-derived-key-salt-${unitSuffix}";
           ownerName = if secretCfg.owner != null then secretCfg.owner else "root";
           groupName = if secretCfg.group != null then secretCfg.group else "root";
+          persistentSaltPath = "${saltStateDir}/${saltPathComponent}";
+          initrdSaltPath = "${initrdSaltDir}/${saltPathComponent}";
         }
       )
       secrets;
@@ -170,40 +185,32 @@ let
   stage2SecretInstances = mkSecretInstances stage2Secrets;
   initrdSecretInstances = mkSecretInstances initrdSecrets;
   secretInstances = stage2SecretInstances // initrdSecretInstances;
-
-  secretNeedsNonRootTraversal =
-    secret:
-    (secret.ownerName != "root" && modeOwnerAllowsRead secret.mode)
-    || (secret.groupName != "root" && modeGroupAllowsRead secret.mode)
-    || modeOtherAllowsRead secret.mode;
-
-  saltDirMode =
-    if
-      cfg.generateSalt
-      && shouldManageTmpfilesDir saltDir
-      && builtins.any
-        (
-          secret:
-          isPathAtOrBelowDir saltDir secret.path
-          && secretNeedsNonRootTraversal secret
+  initrdBootSecrets = lib.mapAttrs'
+    (_: secret: lib.nameValuePair secret.initrdSaltPath secret.persistentSaltPath)
+    initrdSecretInstances;
+  installSaltHook =
+    if hasInitrdSecrets then
+      pkgs.writeShellScript "rpi-otp-derived-key-install-salt" (
+        mkRandomSaltCreationScript (
+          map (secret: secret.persistentSaltPath) (lib.attrValues initrdSecretInstances)
         )
-        (lib.attrValues secretInstances)
-    then
-      "0711"
+      )
     else
-      "0700";
+      null;
 
   managedOutputDirs = lib.unique (
     lib.filter
-      (dir: shouldManageTmpfilesDir dir && (!cfg.generateSalt || dir != saltDir))
+      shouldManageTmpfilesDir
       (lib.mapAttrsToList (_: secret: secret.outputDir) secretInstances)
   );
 
-  tmpfilesRules =
-    lib.optionals (cfg.generateSalt && shouldManageTmpfilesDir saltDir) [
-      "d ${saltDir} ${saltDirMode} root root - -"
+  tmpfilesRules = lib.unique (
+    [
+      "d /var/lib/rpi-otp-derived-key 0711 root root - -"
+      "d ${saltStateDir} 0700 root root - -"
     ]
-    ++ map (dir: "d ${dir} 0711 root root - -") managedOutputDirs;
+    ++ map (dir: "d ${dir} 0711 root root - -") managedOutputDirs
+  );
 
   secretAssertions = lib.flatten (
     lib.mapAttrsToList
@@ -211,16 +218,12 @@ let
         name: secret:
           [
             {
-              assertion = isAbsolutePath secret.path;
-              message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must be an absolute path.";
+              assertion = !isPathAtOrBelowDir saltStateDir secret.path;
+              message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must not point inside the module-managed salt state directory.";
             }
             {
-              assertion = builtins.match "0[0-7]{3}" secret.mode != null;
-              message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.mode must be a four-digit octal string such as \"0400\".";
-            }
-            {
-              assertion = secret.path != cfg.saltFile;
-              message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must not be the same as services.rpiOtpDerivedKey.saltFile.";
+              assertion = !isPathAtOrBelowDir initrdSaltDir secret.path;
+              message = "services.rpiOtpDerivedKey.secrets.${lib.strings.escapeNixIdentifier name}.path must not point inside the module-managed initrd salt directory.";
             }
             {
               assertion = !secret.neededForBoot || isRunPath secret.path;
@@ -239,71 +242,33 @@ let
       secretInstances
   );
 
-  mkSaltService =
-    { initrd ? false
-    , targetSaltFile
-    , secretSet
-    ,
-    }:
-    lib.optionalAttrs (cfg.generateSalt && secretSet != { }) {
-      "rpi-otp-derived-key-salt" = {
-        description =
-          if initrd then
-            "Generate persistent salt for rpi-otp-derived-key in initrd"
-          else
-            "Generate persistent salt for rpi-otp-derived-key";
-        before = lib.mapAttrsToList (_: secret: "${secret.unitName}.service") secretSet;
-        requires = lib.optionals (initrd && targetSaltFile != cfg.saltFile) [ "sysroot.mount" ];
-        after =
-          lib.optionals (!initrd) [ "local-fs.target" ]
-          ++ lib.optionals (initrd && targetSaltFile != cfg.saltFile) [ "sysroot.mount" ];
-        unitConfig =
-          lib.optionalAttrs (!initrd)
-            {
-              DefaultDependencies = "no";
-            }
-          // {
-            ConditionPathExists = "!${targetSaltFile}";
-            RequiresMountsFor = [ (builtins.dirOf targetSaltFile) ];
-          };
+  stage2SaltServices = lib.mapAttrs'
+    (
+      _: secret:
+      lib.nameValuePair secret.saltUnitName {
+        description = "Generate persistent salt for rpi-otp-derived-key secret ${secret.name}";
+        before = [ "${secret.unitName}.service" ];
+        after = [ "local-fs.target" ];
+        unitConfig = {
+          DefaultDependencies = "no";
+          ConditionPathExists = "!${secret.persistentSaltPath}";
+          RequiresMountsFor = [ (builtins.dirOf secret.persistentSaltPath) ];
+        };
         serviceConfig = {
           Type = "oneshot";
           UMask = "0077";
           NoNewPrivileges = true;
           PrivateTmp = true;
           ProtectSystem = "strict";
-          ReadWritePaths = [ (builtins.dirOf targetSaltFile) ];
+          ReadWritePaths = [ (builtins.dirOf secret.persistentSaltPath) ];
         };
-        script = ''
-          set -euo pipefail
-
-          salt_dir=${lib.escapeShellArg (builtins.dirOf targetSaltFile)}
-          salt_path=${lib.escapeShellArg targetSaltFile}
-          salt_length=${toString cfg.saltLength}
-
-          ${pkgs.coreutils}/bin/mkdir -p "$salt_dir"
-
-          if [[ -e "$salt_path" ]]; then
-            exit 0
-          fi
-
-          tmp_path="$(${pkgs.coreutils}/bin/mktemp "$salt_dir/.rpi-otp-derived-key-salt.tmp.XXXXXX")"
-          trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
-
-          ${pkgs.openssl}/bin/openssl rand -out "$tmp_path" "$salt_length"
-
-          ${pkgs.coreutils}/bin/chown root:root "$tmp_path"
-          ${pkgs.coreutils}/bin/chmod 0400 "$tmp_path"
-          ${pkgs.coreutils}/bin/mv -f "$tmp_path" "$salt_path"
-
-          trap - EXIT
-        '';
-      };
-    };
+        script = mkRandomSaltCreationScript [ secret.persistentSaltPath ];
+      }
+    )
+    stage2SecretInstances;
 
   mkSecretServices =
     { initrd ? false
-    , targetSaltFile
     , secretSet
     ,
     }:
@@ -312,15 +277,15 @@ let
         _: secret:
         lib.nameValuePair secret.unitName {
           description = "Generate device-unique key material from Raspberry Pi OTP for ${secret.name}";
-          wantedBy = secret.wantedBy;
+          wantedBy = if initrd then [ "initrd.target" ] else [ "sysinit.target" ];
           before = secret.before;
-          wants = lib.optional cfg.generateSalt "rpi-otp-derived-key-salt.service";
-          requires = lib.optionals (initrd && targetSaltFile != cfg.saltFile) [ "sysroot.mount" ];
+          requires =
+            lib.optionals initrd [ "initrd-nixos-copy-secrets.service" ]
+            ++ lib.optionals (!initrd) [ "${secret.saltUnitName}.service" ];
           after =
             lib.optionals (!initrd) [ "local-fs.target" ]
             ++ lib.optionals initrd [ "initrd-nixos-copy-secrets.service" ]
-            ++ lib.optionals (initrd && targetSaltFile != cfg.saltFile) [ "sysroot.mount" ]
-            ++ lib.optional cfg.generateSalt "rpi-otp-derived-key-salt.service";
+            ++ lib.optionals (!initrd) [ "${secret.saltUnitName}.service" ];
           unitConfig =
             lib.optionalAttrs (!initrd)
               {
@@ -329,7 +294,7 @@ let
             // {
               RequiresMountsFor = lib.unique (
                 [ secret.outputDir ]
-                ++ lib.optionals (!(isRunPath targetSaltFile || isStorePath targetSaltFile)) [ (builtins.dirOf targetSaltFile) ]
+                ++ lib.optionals (!initrd) [ (builtins.dirOf secret.persistentSaltPath) ]
               );
             };
           serviceConfig = {
@@ -340,7 +305,9 @@ let
             PrivateTmp = true;
             ProtectSystem = "strict";
             ReadWritePaths = [ secret.outputDir ];
-            LoadCredential = [ "salt:${targetSaltFile}" ];
+            LoadCredential = [
+              "salt:${if initrd then secret.initrdSaltPath else secret.persistentSaltPath}"
+            ];
           };
           script = ''
             set -euo pipefail
@@ -356,7 +323,7 @@ let
             trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
 
             cmd=(
-              ${lib.getExe cfg.package}
+              ${lib.getExe modulePackage}
               --format ${lib.escapeShellArg secret.format}
               --salt-file "$CREDENTIALS_DIRECTORY/salt"
             )
@@ -373,105 +340,18 @@ let
       )
       secretSet;
 
-  stage2SaltService = mkSaltService {
-    targetSaltFile = cfg.saltFile;
-    secretSet = stage2SecretInstances;
-  };
-
-  initrdSaltService = mkSaltService {
-    initrd = true;
-    targetSaltFile = initrdSaltFile;
-    secretSet = initrdSecretInstances;
-  };
-
   stage2SecretServices = mkSecretServices {
-    targetSaltFile = cfg.saltFile;
     secretSet = stage2SecretInstances;
   };
 
   initrdSecretServices = mkSecretServices {
     initrd = true;
-    targetSaltFile = initrdSaltFile;
     secretSet = initrdSecretInstances;
   };
 in
 {
   options.services.rpiOtpDerivedKey = {
     enable = lib.mkEnableOption "Raspberry Pi OTP-derived key generation services";
-
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs."rpi-otp-derived-key" or defaultPackage;
-      description = ''
-        Package providing the `rpi-otp-derived-key` executable.
-      '';
-    };
-
-    initrdStorePaths = lib.mkOption {
-      type = with lib.types; listOf package;
-      default = [ ];
-      description = ''
-        Extra packages to add to `/bin` in the initrd for secrets with
-        `neededForBoot = true`, in addition to the bundled helper set that
-        `rpi-otp-derived-key` expects.
-
-        If you override `package`, add any extra initrd-visible helper
-        packages that the replacement command needs here.
-      '';
-    };
-
-    saltFile = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/rpi-otp-derived-key/salt";
-      example = "/var/lib/rpi-otp-derived-key/salt";
-      description = ''
-        Path to the shared salt file. By default this is a persistent path under
-        `/var/lib` so the same salt survives reboots and normal OS updates.
-        This file is injected into the services via `systemd`'s
-        `LoadCredential=` mechanism and is not passed as a literal command-line
-        value.
-
-        When any secret uses `neededForBoot`, keeping the default `/var/lib`
-        path means initrd generation can happen after `sysroot` is mounted.
-        For secrets that must exist earlier in initrd, point this at a
-        `/run/...` path and set `initrdSaltSource` so the module can expose the
-        same salt through `boot.initrd.secrets`.
-      '';
-    };
-
-    initrdSaltSource = lib.mkOption {
-      type = with lib.types; nullOr path;
-      default = null;
-      example = "/persist/secrets/rpi-otp-derived-key-salt";
-      description = ''
-        Source file to project into the initrd via `boot.initrd.secrets` at
-        `saltFile`.
-
-        This is the recommended way to supply a shared salt before `sysroot` is
-        mounted when any secret uses `neededForBoot = true`.
-
-        Keep `saltFile` under `/run` when using this option. Also note that if
-        the selected bootloader does not support native initrd secrets, NixOS
-        will copy this source file into the initrd payload during build time.
-      '';
-    };
-
-    generateSalt = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Generate a random salt file on first boot when `saltFile` does not
-        already exist.
-      '';
-    };
-
-    saltLength = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 32;
-      description = ''
-        Number of random bytes to generate for a new salt file.
-      '';
-    };
 
     secrets = lib.mkOption {
       type = with lib.types; attrsOf secretType;
@@ -489,64 +369,36 @@ in
     assertions =
       [
         {
-          assertion = effectiveSecrets != { };
+          assertion = cfg.secrets != { };
           message = "services.rpiOtpDerivedKey.enable requires at least one secret in services.rpiOtpDerivedKey.secrets.";
-        }
-        {
-          assertion = isAbsolutePath cfg.saltFile;
-          message = "services.rpiOtpDerivedKey.saltFile must be an absolute path.";
-        }
-        {
-          assertion = !cfg.generateSalt || !isStorePath cfg.saltFile;
-          message = "services.rpiOtpDerivedKey.saltFile must not point inside the Nix store when services.rpiOtpDerivedKey.generateSalt is enabled.";
-        }
-        {
-          assertion = !cfg.generateSalt || !(cfg.saltFile == "/run" || lib.hasPrefix "/run/" cfg.saltFile);
-          message = "services.rpiOtpDerivedKey.saltFile must not point inside /run when services.rpiOtpDerivedKey.generateSalt is enabled.";
-        }
-        {
-          assertion = cfg.initrdSaltSource == null || isRunPath cfg.saltFile;
-          message = "services.rpiOtpDerivedKey.saltFile must point inside /run when services.rpiOtpDerivedKey.initrdSaltSource is set.";
-        }
-        {
-          assertion = cfg.initrdSaltSource == null || !cfg.generateSalt;
-          message = "services.rpiOtpDerivedKey.generateSalt must be false when services.rpiOtpDerivedKey.initrdSaltSource is set.";
         }
         {
           assertion = !hasInitrdSecrets || config.boot.initrd.systemd.enable;
           message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot requires boot.initrd.systemd.enable = true.";
         }
+        {
+          assertion = !hasInitrdSecrets || config.boot.loader.supportsInitrdSecrets;
+          message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot requires a bootloader that supports native initrd secrets.";
+        }
+        {
+          assertion = !hasInitrdSecrets || raspberryPiBootloaderEnabled;
+          message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot is currently supported only for boot.loader.raspberry-pi.";
+        }
       ]
       ++ secretAssertions;
 
-    warnings = lib.optional (cfg.initrdSaltSource != null && !config.boot.loader.supportsInitrdSecrets) ''
-      services.rpiOtpDerivedKey.initrdSaltSource uses boot.initrd.secrets, but the
-      current bootloader does not support native initrd secrets. NixOS will copy
-      the salt source into the initrd payload during build time, so treat that
-      salt as public or use a different early-boot provisioning mechanism.
-    '';
+    system.build.rpiOtpDerivedKeyInstallSaltHook = lib.mkIf (
+      hasInitrdSecrets && raspberryPiBootloaderEnabled
+    ) installSaltHook;
 
-    systemd.services = stage2SaltService // stage2SecretServices;
+    systemd.services = stage2SaltServices // stage2SecretServices;
 
-    boot.initrd.secrets = lib.mkIf (cfg.initrdSaltSource != null) {
-      "${cfg.saltFile}" = cfg.initrdSaltSource;
-    };
+    boot.initrd.secrets = lib.mkIf hasInitrdSecrets initrdBootSecrets;
 
     boot.initrd.systemd = lib.mkIf hasInitrdSecrets {
-      initrdBin = defaultInitrdPackages ++ cfg.initrdStorePaths;
-      storePaths =
-        map (source: { inherit source; })
-          (
-            lib.unique (
-              [
-                cfg.package
-              ]
-              ++ defaultInitrdPackages
-              ++ cfg.initrdStorePaths
-            )
-          )
-        ++ lib.optionals (isStorePath cfg.saltFile) [ cfg.saltFile ];
-      services = initrdSaltService // initrdSecretServices;
+      initrdBin = defaultInitrdPackages;
+      storePaths = map (source: { inherit source; }) initrdServiceStorePaths;
+      services = initrdSecretServices;
     };
   };
 }
