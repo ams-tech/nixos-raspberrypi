@@ -59,6 +59,15 @@ let
           platforms = lib.platforms.linux;
         };
       });
+    rpi-otp-derived-key-provision =
+      (prev.callPackage ../../pkgs/raspberrypi/rpi-otp-derived-key-provision.nix {
+        rpi-otp-private-key = final.rpi-otp-private-key;
+        rpi-otp-derived-key = final.rpi-otp-derived-key;
+      }).overrideAttrs (old: {
+        meta = (old.meta or { }) // {
+          platforms = lib.platforms.linux;
+        };
+      });
   };
 in
 {

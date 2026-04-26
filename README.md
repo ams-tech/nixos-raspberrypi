@@ -248,13 +248,15 @@ An alternative ways to consume individual packages without overlays are:
 
 ## Raspberry Pi OTP key utilities
 
-The flake provides two Raspberry Pi OTP key utilities:
+The flake provides Raspberry Pi OTP key utilities:
 
 - `rpi-otp-private-key` packages Raspberry Pi's `rpi-eeprom` helper for reading
   or programming the OTP private key.
 - `rpi-otp-derived-key` derives deterministic key material from the OTP private
   key with HKDF-SHA256 and can emit hex, binary, Ed25519 PEM, or age identity
   output.
+- `rpi-otp-derived-key-provision` stages OTP-derived secrets and installs their
+  salts for install-time workflows.
 
 They can be consumed directly from the flake:
 
@@ -262,6 +264,7 @@ They can be consumed directly from the flake:
 environment.systemPackages = [
   nixos-raspberrypi.packages.aarch64-linux.rpi-otp-private-key
   nixos-raspberrypi.packages.aarch64-linux.rpi-otp-derived-key
+  nixos-raspberrypi.packages.aarch64-linux.rpi-otp-derived-key-provision
 ];
 ```
 
@@ -271,6 +274,7 @@ Or through the Raspberry Pi package overlay:
 environment.systemPackages = with pkgs; [
   rpi-otp-private-key
   rpi-otp-derived-key
+  rpi-otp-derived-key-provision
 ];
 ```
 
@@ -340,8 +344,8 @@ if the OTP private key is not programmed.
 }
 ```
 
-The module does not enroll LUKS keyslots. Add the derived key to the encrypted
-device yourself before relying on it for unattended unlock.
+The module does not enroll existing LUKS devices by itself. For fresh disko
+installs, see [OTP-derived LUKS installs with disko](docs/rpi-otp-derived-key-disko.md).
 
 # Design goals
 
