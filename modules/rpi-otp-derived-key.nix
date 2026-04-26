@@ -159,6 +159,41 @@ let
       set -euo pipefail
       ${lib.concatMapStringsSep "\n" mkRandomSaltCreationSnippet saltPaths}
     '';
+  mkSecretCreationScript =
+    { secret
+    , saltFileAssignment
+    , prelude ? ""
+    ,
+    }: ''
+      set -euo pipefail
+
+      ${prelude}
+
+      output_dir=${lib.escapeShellArg secret.outputDir}
+      output_path=${lib.escapeShellArg secret.path}
+      owner=${lib.escapeShellArg secret.ownerName}
+      group=${lib.escapeShellArg secret.groupName}
+      mode=${lib.escapeShellArg secret.mode}
+      salt_file=${saltFileAssignment}
+
+      ${pkgs.coreutils}/bin/mkdir -p "$output_dir"
+      tmp_path="$(${pkgs.coreutils}/bin/mktemp "$output_dir/.${secret.unitSuffix}.tmp.XXXXXX")"
+      trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
+
+      cmd=(
+        ${lib.getExe modulePackage}
+        --format ${lib.escapeShellArg secret.format}
+        --salt-file "$salt_file"
+      )
+
+      "''${cmd[@]}" > "$tmp_path"
+
+      ${pkgs.coreutils}/bin/chown "$owner:$group" "$tmp_path"
+      ${pkgs.coreutils}/bin/chmod "$mode" "$tmp_path"
+      ${pkgs.coreutils}/bin/mv -f "$tmp_path" "$output_path"
+
+      trap - EXIT
+    '';
 
   mkSecretInstances =
     secrets:
@@ -332,33 +367,10 @@ EOF
               "salt:${if initrd then secret.initrdSaltPath else secret.persistentSaltPath}"
             ];
           };
-          script = ''
-            set -euo pipefail
-
-            output_dir=${lib.escapeShellArg secret.outputDir}
-            output_path=${lib.escapeShellArg secret.path}
-            owner=${lib.escapeShellArg secret.ownerName}
-            group=${lib.escapeShellArg secret.groupName}
-            mode=${lib.escapeShellArg secret.mode}
-
-            ${pkgs.coreutils}/bin/mkdir -p "$output_dir"
-            tmp_path="$(${pkgs.coreutils}/bin/mktemp "$output_dir/.${secret.unitSuffix}.tmp.XXXXXX")"
-            trap '${pkgs.coreutils}/bin/rm -f "$tmp_path"' EXIT
-
-            cmd=(
-              ${lib.getExe modulePackage}
-              --format ${lib.escapeShellArg secret.format}
-              --salt-file "$CREDENTIALS_DIRECTORY/salt"
-            )
-
-            "''${cmd[@]}" > "$tmp_path"
-
-            ${pkgs.coreutils}/bin/chown "$owner:$group" "$tmp_path"
-            ${pkgs.coreutils}/bin/chmod "$mode" "$tmp_path"
-            ${pkgs.coreutils}/bin/mv -f "$tmp_path" "$output_path"
-
-            trap - EXIT
-          '';
+          script = mkSecretCreationScript {
+            inherit secret;
+            saltFileAssignment = ''"$CREDENTIALS_DIRECTORY/salt"'';
+          };
         }
       )
       secretSet;
@@ -371,6 +383,19 @@ EOF
     initrd = true;
     secretSet = initrdSecretInstances;
   };
+
+  ensureScripts = lib.mapAttrs
+    (
+      _: secret:
+      pkgs.writeShellScript "rpi-otp-derived-key-ensure-${secret.saltPathComponent}" (
+        mkSecretCreationScript {
+          inherit secret;
+          saltFileAssignment = lib.escapeShellArg secret.persistentSaltPath;
+          prelude = mkRandomSaltCreationSnippet secret.persistentSaltPath;
+        }
+      )
+    )
+    secretInstances;
 in
 {
   options.services.rpiOtpDerivedKey = {
@@ -388,6 +413,8 @@ in
 
   config = lib.mkIf cfg.enable {
     systemd.tmpfiles.rules = tmpfilesRules;
+
+    system.build.rpiOtpDerivedKeyEnsureScripts = ensureScripts;
 
     assertions =
       [

@@ -287,6 +287,8 @@ By default, the module creates one persistent salt per secret under `/var/lib/rp
 
 Stage-2 secrets default to `sysinit.target`, so they are available to early boot consumers instead of waiting for `multi-user.target`.
 
+Each configured secret also exposes a stable executable at `config.system.build.rpiOtpDerivedKeyEnsureScripts.<name>`. Running it creates the module-managed salt if needed, then writes the derived secret to `services.rpiOtpDerivedKey.secrets.<name>.path` with the configured ownership and mode. This is intended for install-time consumers that need a specific derived secret before the normal systemd unit has run.
+
 On `boot.loader.raspberry-pi`, bootloader installation also checks that the Raspberry Pi OTP private key is already programmed whenever OTP-derived secrets are enabled. If the OTP key is still blank, installation fails early with a `rpi-otp-private-key -w ...` hint instead of deferring the failure until the first secret-generation service runs.
 
 ## Initrd usage
