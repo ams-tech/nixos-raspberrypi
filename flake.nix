@@ -154,6 +154,8 @@
 
       raspberrypi-utils = pkgs.raspberrypi-utils;
       raspberrypi-udev-rules = (pkgs.callPackage ./pkgs/raspberrypi/udev-rules.nix {});
+      rpi-otp-derived-key = pkgs.rpi-otp-derived-key;
+      rpi-otp-private-key = pkgs.rpi-otp-private-key;
       rpicam-apps = pkgs.rpicam-apps;
 
       vlc = pkgs.vlc;
@@ -182,6 +184,77 @@
 
       pisugar-power-manager-rs = pkgs.callPackage ./pkgs/pisugar-power-manager-rs.nix {};
 
+    });
+
+    checks = forSystems rpiSystems (system: let
+      pkgs = self.legacyPackages.${system};
+      rpi-otp-private-key-stub = pkgs.writeShellApplication {
+        name = "rpi-otp-private-key";
+        text = ''
+          words=8
+          offset=0
+
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -l)
+                words="$2"
+                shift 2
+                ;;
+              -o)
+                offset="$2"
+                shift 2
+                ;;
+              *)
+                echo "unexpected argument: $1" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          [ "$words" = 8 ]
+          [ "$offset" = 0 ]
+          printf '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n'
+        '';
+      };
+      rpi-otp-derived-key-test = pkgs.callPackage ./pkgs/raspberrypi/rpi-otp-derived-key.nix {
+        rpi-otp-private-key = rpi-otp-private-key-stub;
+      };
+    in {
+      rpi-otp-derived-key = pkgs.rpi-otp-derived-key;
+      rpi-otp-private-key = pkgs.rpi-otp-private-key;
+
+      rpi-otp-derived-key-functional = pkgs.runCommand "rpi-otp-derived-key-functional"
+        {
+          nativeBuildInputs = [
+            pkgs.age
+            pkgs.coreutils
+            pkgs.gnugrep
+            pkgs.openssl
+            rpi-otp-derived-key-test
+          ];
+        }
+        ''
+          expected_formats='hex
+binary
+ed25519
+age'
+          actual_formats="$(rpi-otp-derived-key --list-formats)"
+          [ "$actual_formats" = "$expected_formats" ]
+
+          hex="$(rpi-otp-derived-key --salt test --length 16)"
+          [ "''${#hex}" -eq 32 ]
+          printf '%s\n' "$hex" | grep -Eq '^[0-9a-f]{32}$'
+
+          rpi-otp-derived-key --salt test --format ed25519 > ed25519.pem
+          openssl pkey -in ed25519.pem -noout
+
+          rpi-otp-derived-key --salt test --format age > age-identity.txt
+          age_secret="$(grep '^AGE-SECRET-KEY-1' age-identity.txt)"
+          age_recipient="$(printf '%s\n' "$age_secret" | age-keygen -y)"
+          grep -qx "# public key: $age_recipient" age-identity.txt
+
+          touch $out
+        '';
     });
 
     nixosConfigurations = let

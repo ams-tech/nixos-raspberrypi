@@ -246,6 +246,44 @@ An alternative ways to consume individual packages without overlays are:
 
 - to get it from `nixos-raspberrypi.legacyPackages.<system>`. Here all overlays are applied.
 
+## Raspberry Pi OTP key utilities
+
+The flake provides two Raspberry Pi OTP key utilities:
+
+- `rpi-otp-private-key` packages Raspberry Pi's `rpi-eeprom` helper for reading
+  or programming the OTP private key.
+- `rpi-otp-derived-key` derives deterministic key material from the OTP private
+  key with HKDF-SHA256 and can emit hex, binary, Ed25519 PEM, or age identity
+  output.
+
+They can be consumed directly from the flake:
+
+```nix
+environment.systemPackages = [
+  nixos-raspberrypi.packages.aarch64-linux.rpi-otp-private-key
+  nixos-raspberrypi.packages.aarch64-linux.rpi-otp-derived-key
+];
+```
+
+Or through the Raspberry Pi package overlay:
+
+```nix
+environment.systemPackages = with pkgs; [
+  rpi-otp-private-key
+  rpi-otp-derived-key
+];
+```
+
+Example:
+
+```shell
+rpi-otp-derived-key --salt-file /etc/machine-id --format age
+```
+
+The OTP private key and anything derived from it should be treated as secret
+material. These tools are intended for Raspberry Pi hardware with a programmed
+OTP private key.
+
 # Design goals
 
 This is basically [`boot.loader.raspberryPi` options](https://search.nixos.org/options?channel=unstable&show=boot.loader.raspberryPi), which are deprecated in nixpkgs, but updated and improved upon.
