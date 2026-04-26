@@ -3,8 +3,20 @@
 let
   cfg = config.boot.loader.raspberry-pi;
   isAarch64 = pkgs.stdenv.hostPlatform.isAarch64;
+  otpInstallHooks = lib.attrByPath [ "system" "build" "rpiOtpDerivedKeyInstallHooks" ] [ ] config;
+  preInstallHooks = cfg.preInstallHooks ++ otpInstallHooks;
 
   ubootBinName = if isAarch64 then "u-boot-rpi-arm64.bin" else "u-boot-rpi.bin";
+
+  preInstallHookScript =
+    if preInstallHooks == [ ] then
+      null
+    else
+      pkgs.writeShellScript "raspberrypi-pre-install-hooks" ''
+        set -euo pipefail
+
+        ${lib.concatMapStringsSep "\n" (hook: "${lib.escapeShellArg (toString hook)} \"$@\"") preInstallHooks}
+      '';
 
 
   mkBootloader = pkgs: bootloader {
@@ -43,12 +55,14 @@ let
       path = pkgs.lib.makeBinPath [
         pkgs.coreutils
         pkgs.gnused
+        pkgs.jq
       ];
 
       # NixOS-generations -independent
       installFirmwareBuilder = firmwareInstaller;
       # NixOS-generations -dependent
       inherit nixosGenerationsDir nixosGenBuilder;
+      preInstallHook = lib.escapeShellArg (if preInstallHookScript != null then toString preInstallHookScript else "");
     };
   });
 
@@ -62,6 +76,7 @@ let
       inherit (pkgs) bash;
       path = pkgs.lib.makeBinPath [
         pkgs.coreutils
+        pkgs.jq
       ];
 
       installDeviceTree = deviceTreeInstaller;
@@ -112,16 +127,18 @@ let
   kernelbootBuilder = import ./kernelboot-builder.nix {
     inherit pkgs;
     firmwareBuilder = firmwarePopulateCmd;
+    preInstallHook = preInstallHookScript;
   };
   ubootBuilder = import ./uboot-builder.nix {
     inherit pkgs ubootBinName;
     inherit (cfg) ubootPackage;
     firmwareBuilder = firmwarePopulateCmd;
     extlinuxConfBuilder = config.boot.loader.generic-extlinux-compatible.populateCmd;
+    preInstallHook = preInstallHookScript;
   };
 
   # Builders exposed via populateCmd, which run on the build architecture
-  populateFirmwareBuilder = import  ./firmware-builder.nix {
+  populateFirmwareBuilder = import ./firmware-builder.nix {
     pkgs = pkgs.buildPackages;
     configTxt = cfg.configTxtPackage;
     firmware = cfg.firmwarePackage;
@@ -145,19 +162,22 @@ let
   # system.build.installBootloader
   builder = {
     # system.build.installBootLoader
-    uboot = "${ubootBuilder} -f ${cfg.firmwarePath} -b ${cfg.bootPath} -c";
+    uboot = "${ubootBuilder} -i -f ${cfg.firmwarePath} -b ${cfg.bootPath} -c";
     kernelboot = lib.concatStringsSep " " [
       "${kernelbootBuilder}"
+      "-i"
       "-f ${cfg.firmwarePath}"
       "-c"
     ];
     kernelboot-legacy-unsupported = lib.concatStringsSep " " [
       "${kernelbootBuilder}"
+      "-i"
       "-f ${cfg.firmwarePath}"
       "-c"
     ];
     kernel = lib.concatStringsSep " " [
       "${mkBootloader pkgs}"
+      "-i"
       "-g ${toString cfg.configurationLimit}"
       "-f ${cfg.firmwarePath}"
       "-c"
@@ -179,14 +199,17 @@ let
       firmware = "${populateKernelbootBuilder}";
       boot = "${populateKernelbootBuilder}";
     };
-    kernel = let cmd = lib.concatStringsSep " " [
-      "${mkBootloader pkgs.buildPackages}"
-      "-g ${toString cfg.configurationLimit}"
-    ];
-    in {
-      firmware = "${cmd}";
-      boot = "${cmd}";
-    };
+    kernel =
+      let
+        cmd = lib.concatStringsSep " " [
+          "${mkBootloader pkgs.buildPackages}"
+          "-g ${toString cfg.configurationLimit}"
+        ];
+      in
+      {
+        firmware = "${cmd}";
+        boot = "${cmd}";
+      };
   };
 in
 
@@ -256,9 +279,20 @@ in
         '';
       };
 
+      preInstallHooks = lib.mkOption {
+        internal = true;
+        type = with lib.types; listOf package;
+        default = [ ];
+        description = ''
+          Internal hook scripts that should run before Raspberry Pi bootloader
+          installation updates boot artifacts on the target system.
+        '';
+      };
+
       useGenerationDeviceTree = lib.mkOption {
-        default = if cfg.bootloader == "kernel" then true
-                  else false;  # generic-extlinux-compatible defaults to `true`
+        default =
+          if cfg.bootloader == "kernel" then true
+          else false; # generic-extlinux-compatible defaults to `true`
         type = lib.types.bool;
         description = ''
           Whether to use device tree supplied by:
@@ -411,17 +445,20 @@ in
           The "-legacy-unsupported" suffix will silence this warning until the final deletion.
         '';
 
-      assertions = let
-        supportAarch64 = [ "02" "3" "4" "5" ];
-      in [{
-        assertion = !pkgs.stdenv.hostPlatform.isAarch64
-                    || lib.elem cfg.variant supportAarch64;
-        message = ''
-          Only Raspberry Pi versions
-          ${lib.concatStringsSep ", " supportAarch64} support aarch64.
-        '';
-      }];
+      assertions =
+        let
+          supportAarch64 = [ "02" "3" "4" "5" ];
+        in
+        [{
+          assertion = !pkgs.stdenv.hostPlatform.isAarch64
+            || lib.elem cfg.variant supportAarch64;
+          message = ''
+            Only Raspberry Pi versions
+            ${lib.concatStringsSep ", " supportAarch64} support aarch64.
+          '';
+        }];
       boot.loader.grub.enable = false;
+      boot.loader.supportsInitrdSecrets = true;
       boot.loader.raspberry-pi.firmwarePopulateCmd = populateCmds.${cfg.bootloader}.firmware;
       boot.loader.raspberry-pi.bootPopulateCmd = populateCmds.${cfg.bootloader}.boot;
     })
@@ -461,14 +498,16 @@ in
           };
         };
       };
-      hardware.raspberry-pi.extra-config = let
-        # https://www.raspberrypi.com/documentation/computers/config_txt.html#initramfs
-        ramfsfile = "initrd";
-        ramfsaddr = "followkernel"; # same as 0 = "after the kernel image"
-      in ''
-        [all]
-        initramfs ${ramfsfile} ${ramfsaddr}
-      '';
+      hardware.raspberry-pi.extra-config =
+        let
+          # https://www.raspberrypi.com/documentation/computers/config_txt.html#initramfs
+          ramfsfile = "initrd";
+          ramfsaddr = "followkernel"; # same as 0 = "after the kernel image"
+        in
+        ''
+          [all]
+          initramfs ${ramfsfile} ${ramfsaddr}
+        '';
 
       system = {
         build.installBootLoader = builder.${cfg.bootloader};

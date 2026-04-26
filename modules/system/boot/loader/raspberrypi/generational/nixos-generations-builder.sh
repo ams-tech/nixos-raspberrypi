@@ -105,17 +105,21 @@ addAllEntries() {
 }
 
 usage() {
-    echo "usage: $0 -c <path-to-default-configuration> [-b <boot-dir>] [-g <num-generations>]" >&2
+    echo "usage: $0 [-i] -c <path-to-default-configuration> [-b <boot-dir>] [-g <num-generations>]" >&2
     exit 1
 }
 
 
 default=                # Default configuration
 numGenerations=0        # Number of other generations to keep (kernel, initrd, DTBs, overlays)
+runInstallHook=0
+boottarget=
+fwtarget=
 
-echo "$0: $@"
-while getopts "c:b:g:f:" opt; do
+echo "$0: $*"
+while getopts "ic:b:g:f:" opt; do
     case "$opt" in
+        i) runInstallHook=1 ;;
         c) default="$OPTARG" ;;
         b) boottarget="$OPTARG" ;;
         g) numGenerations="$OPTARG" ;;
@@ -127,6 +131,13 @@ done
 if [ -z "$boottarget" ] && [ -z "$fwtarget" ]; then
     echo "Error: at least one of \`-b <boot-dir>\` and \`-f <firmware-dir>\` must be set"
     usage
+fi
+
+if [ "$runInstallHook" = "1" ]; then
+    pre_install_hook=@preInstallHook@
+    if [ -n "$pre_install_hook" ]; then
+        "$pre_install_hook" "$default" "$boottarget" "$fwtarget"
+    fi
 fi
 
 if [ -n "$fwtarget" ]; then
