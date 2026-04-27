@@ -34,13 +34,7 @@ let
     }
   );
   defaultOtpHelperPackage = lib.optional
-    (
-      builtins.elem pkgs.stdenv.hostPlatform.system [
-        "armv6l-linux"
-        "armv7l-linux"
-        "aarch64-linux"
-      ]
-    )
+    (lib.meta.availableOn pkgs.stdenv.hostPlatform otpHelperPackage)
     otpHelperPackage;
   defaultInitrdPackages = [
     pkgs.age
@@ -342,12 +336,13 @@ let
         _: secret:
         lib.nameValuePair secret.unitName {
           description = "Generate device-unique key material from Raspberry Pi OTP for ${secret.name}";
-          wantedBy = if initrd then [ "cryptsetup-pre.target" ] else [ "sysinit.target" ];
+          wantedBy = if initrd then [ "cryptsetup.target" ] else [ "sysinit.target" ];
           before = lib.unique (
             lib.optionals initrd [ "cryptsetup-pre.target" ]
             ++ secret.before
           );
           wants = lib.optionals initrd [
+            "cryptsetup-pre.target"
             "systemd-udev-trigger.service"
             "systemd-udev-settle.service"
           ];
@@ -362,17 +357,13 @@ let
               "systemd-udev-settle.service"
             ]
             ++ lib.optionals (!initrd) [ "${secret.saltUnitName}.service" ];
-          unitConfig =
-            lib.optionalAttrs (!initrd)
-              {
-                DefaultDependencies = "no";
-              }
-            // {
-              RequiresMountsFor = lib.unique (
-                [ secret.outputDir ]
-                ++ lib.optionals (!initrd) [ (builtins.dirOf secret.persistentSaltPath) ]
-              );
-            };
+          unitConfig = {
+            DefaultDependencies = "no";
+            RequiresMountsFor = lib.unique (
+              [ secret.outputDir ]
+              ++ lib.optionals (!initrd) [ (builtins.dirOf secret.persistentSaltPath) ]
+            );
+          };
           serviceConfig = {
             Type = "oneshot";
             RemainAfterExit = true;
@@ -380,7 +371,7 @@ let
             NoNewPrivileges = true;
             PrivateTmp = true;
             ProtectSystem = "strict";
-            ReadWritePaths = [ secret.outputDir ];
+            ReadWritePaths = if initrd then [ "/run" ] else [ secret.outputDir ];
             LoadCredential = [
               "salt:${if initrd then secret.initrdSaltPath else secret.persistentSaltPath}"
             ];
@@ -471,7 +462,10 @@ in
     boot.initrd.secrets = lib.mkIf hasInitrdSecrets initrdBootSecrets;
 
     boot.initrd.systemd = lib.mkIf hasInitrdSecrets {
-      additionalUpstreamUnits = [ "cryptsetup-pre.target" ];
+      additionalUpstreamUnits = lib.optionals (config.boot.initrd.luks.devices == { }) [
+        "cryptsetup-pre.target"
+        "cryptsetup.target"
+      ];
       initrdBin = defaultInitrdPackages;
       storePaths = map (source: { inherit source; }) initrdServiceStorePaths;
       services = initrdSecretServices;

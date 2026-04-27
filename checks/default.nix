@@ -181,6 +181,9 @@ let
       rpi-otp-derived-key-install-time-otp-check = pkgs.callPackage ./rpi-otp-derived-key-install-time-otp-check.nix {
         inherit self;
       };
+      rpi-otp-derived-key-initrd-luks = pkgs.callPackage ./rpi-otp-derived-key-initrd-luks.nix {
+        inherit self;
+      };
       rpi-otp-derived-key-stage2 = pkgs.callPackage ./rpi-otp-derived-key-stage2.nix {
         inherit self;
       };
