@@ -49,8 +49,14 @@ testPkgs.testers.runNixOSTest {
       description = "Format test LUKS disk with OTP-derived initrd key";
       wantedBy = [ "cryptsetup.target" ];
       before = [ "cryptsetup-pre.target" ];
-      after = [ "rpi-otp-derived-key-luks.service" ];
-      requires = [ "rpi-otp-derived-key-luks.service" ];
+      after = [
+        "dev-vdb.device"
+        "rpi-otp-derived-key-luks.service"
+      ];
+      requires = [
+        "dev-vdb.device"
+        "rpi-otp-derived-key-luks.service"
+      ];
       wants = [ "cryptsetup-pre.target" ];
       unitConfig.DefaultDependencies = "no";
       serviceConfig = {
@@ -70,6 +76,7 @@ testPkgs.testers.runNixOSTest {
         format = "hex";
         path = "/run/secrets/luks.key";
         neededForBoot = true;
+        before = [ "cryptsetup-pre.target" ];
       };
     };
   };

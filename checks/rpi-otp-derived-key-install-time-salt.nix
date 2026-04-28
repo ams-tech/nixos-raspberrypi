@@ -11,7 +11,7 @@ in
 testPkgs.testers.runNixOSTest {
   name = "rpi-otp-derived-key-install-time-salt";
 
-  nodes.machine = { config, ... }: {
+  nodes.machine = { ... }: {
     imports = [
       self.nixosModules.bootloader
       self.nixosModules.rpi-otp-derived-key
@@ -20,6 +20,7 @@ testPkgs.testers.runNixOSTest {
     ];
 
     system.stateVersion = "25.11";
+    system.switch.enable = true;
 
     boot.initrd.systemd.enable = true;
     boot.kernelPackages = pkgs.linuxPackages_latest;
@@ -31,13 +32,6 @@ testPkgs.testers.runNixOSTest {
 
     systemd.tmpfiles.rules = [
       "d /var/lib/rpi-boot 0755 root root - -"
-    ];
-
-    environment.systemPackages = [
-      (pkgs.writeShellScriptBin "install-pi-bootloader-test" ''
-        set -euo pipefail
-        ${config.system.build.installBootLoader} /run/current-system
-      '')
     ];
 
     services.rpiOtpDerivedKey = {
@@ -62,7 +56,7 @@ testPkgs.testers.runNixOSTest {
 
     machine.fail("test -e /var/lib/rpi-otp-derived-key/salt/age")
     machine.fail("test -e ${unsafeSaltPath}")
-    machine.succeed("install-pi-bootloader-test")
+    machine.succeed("/run/current-system/bin/switch-to-configuration boot")
 
     machine.succeed("find /var/lib/rpi-otp-derived-key/salt -maxdepth 1 -type f | wc -l | grep -qx '2'")
     machine.succeed("stat -c '%a %U %G' /var/lib/rpi-otp-derived-key/salt/age | grep -qx '400 root root'")

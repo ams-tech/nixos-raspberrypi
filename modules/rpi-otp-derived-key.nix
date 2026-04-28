@@ -8,7 +8,6 @@ let
   cfg = config.services.rpiOtpDerivedKey;
   users = config.users.users;
   otpDerivedKeyLib = import ../lib/rpi-otp-derived-key.nix { };
-  raspberryPiBootloaderEnabled = lib.attrByPath [ "boot" "loader" "raspberry-pi" "enable" ] false config;
   formats = [
     "hex"
     "binary"
@@ -72,8 +71,8 @@ let
             This is useful for consumers that need the derived secret during the
             systemd initrd phase. The module automatically provisions a
             persistent per-secret salt for initrd use during
-            `switch-to-configuration boot` (including `nixos-install`) on
-            Raspberry Pi bootloaders.
+            `switch-to-configuration boot` or `switch-to-configuration switch`
+            before initrd secrets are appended by the bootloader.
           '';
         };
 
@@ -224,38 +223,48 @@ let
   initrdBootSecrets = lib.mapAttrs'
     (_: secret: lib.nameValuePair secret.initrdSaltPath secret.persistentSaltPath)
     initrdSecretInstances;
-  installOtpCheckHook =
-    if cfg.enable then
-      pkgs.writeShellScript "rpi-otp-derived-key-check-otp" ''
-                set -euo pipefail
+  checkOtpProgrammedSnippet = ''
+    if ! ${lib.getExe otpHelperPackage} -c; then
+      cat >&2 <<'EOF'
+services.rpiOtpDerivedKey: Raspberry Pi OTP private key is not programmed.
 
-                if ! ${lib.getExe otpHelperPackage} -c; then
-                  cat >&2 <<'EOF'
-        services.rpiOtpDerivedKey: Raspberry Pi OTP private key is not programmed.
+Program the OTP private key before installing initrd OTP-derived secrets. One supported flow is:
 
-        Program the OTP private key before installing OTP-derived secrets. One supported flow is:
+  openssl ecparam -name prime256v1 -genkey -noout -out private_key.pem
+  openssl ec -in private_key.pem -text -noout | awk '/priv:/{flag=1; next} /pub:/{flag=0} flag' | tr -d ' \n:' | head -n1 > d.hex
+  rpi-otp-private-key -w "$(cat d.hex)"
 
-          openssl ecparam -name prime256v1 -genkey -noout -out private_key.pem
-          openssl ec -in private_key.pem -text -noout | awk '/priv:/{flag=1; next} /pub:/{flag=0} flag' | tr -d ' \n:' | head -n1 > d.hex
-          rpi-otp-private-key -w "$(cat d.hex)"
+Run `rpi-otp-private-key -h` for details and warnings. Aborting bootloader install.
+EOF
+      exit 1
+    fi
+  '';
+  initrdDeviceReadinessSnippet = ''
+    if [[ -e /sys/firmware/devicetree/base/system/linux,revision ]]; then
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -e /dev/vcio ]] && break
+        ${pkgs.coreutils}/bin/sleep 0.1
+      done
+    fi
+  '';
+  preSwitchInitrdSaltCheck = lib.optionalAttrs hasInitrdSecrets {
+    rpi-otp-derived-key-initrd-salts = ''
+      set -euo pipefail
 
-        Run `rpi-otp-private-key -h` for details and warnings. Aborting bootloader install.
-        EOF
-                  exit 1
-                fi
-      ''
-    else
-      null;
-  installSaltHook =
-    if hasInitrdSecrets then
-      pkgs.writeShellScript "rpi-otp-derived-key-install-salt"
-        (
-          mkRandomSaltCreationScript (
-            map (secret: secret.persistentSaltPath) (lib.attrValues initrdSecretInstances)
-          )
-        )
-    else
-      null;
+      case "''${2:-}" in
+        switch|boot)
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+
+      ${checkOtpProgrammedSnippet}
+      ${mkRandomSaltCreationScript (
+        map (secret: secret.persistentSaltPath) (lib.attrValues initrdSecretInstances)
+      )}
+    '';
+  };
 
   managedOutputDirs = lib.unique (
     lib.filter
@@ -336,26 +345,17 @@ let
         _: secret:
         lib.nameValuePair secret.unitName {
           description = "Generate device-unique key material from Raspberry Pi OTP for ${secret.name}";
-          wantedBy = if initrd then [ "cryptsetup.target" ] else [ "sysinit.target" ];
+          wantedBy = if initrd then [ "initrd.target" ] else [ "sysinit.target" ];
           before = lib.unique (
-            lib.optionals initrd [ "cryptsetup-pre.target" ]
+            lib.optionals initrd [ "initrd.target" ]
             ++ secret.before
           );
-          wants = lib.optionals initrd [
-            "cryptsetup-pre.target"
-            "systemd-udev-trigger.service"
-            "systemd-udev-settle.service"
-          ];
           requires =
             lib.optionals initrd [ "initrd-nixos-copy-secrets.service" ]
             ++ lib.optionals (!initrd) [ "${secret.saltUnitName}.service" ];
           after =
             lib.optionals (!initrd) [ "local-fs.target" ]
-            ++ lib.optionals initrd [
-              "initrd-nixos-copy-secrets.service"
-              "systemd-udev-trigger.service"
-              "systemd-udev-settle.service"
-            ]
+            ++ lib.optionals initrd [ "initrd-nixos-copy-secrets.service" ]
             ++ lib.optionals (!initrd) [ "${secret.saltUnitName}.service" ];
           unitConfig = {
             DefaultDependencies = "no";
@@ -379,6 +379,7 @@ let
           script = mkSecretCreationScript {
             inherit secret;
             saltFileAssignment = ''"$CREDENTIALS_DIRECTORY/salt"'';
+            prelude = lib.optionalString initrd initrdDeviceReadinessSnippet;
           };
         }
       )
@@ -439,33 +440,16 @@ in
           assertion = !hasInitrdSecrets || config.boot.loader.supportsInitrdSecrets;
           message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot requires a bootloader that supports native initrd secrets.";
         }
-        {
-          assertion = !hasInitrdSecrets || raspberryPiBootloaderEnabled;
-          message = "services.rpiOtpDerivedKey.secrets.<name>.neededForBoot is currently supported only for boot.loader.raspberry-pi.";
-        }
       ]
       ++ secretAssertions;
 
-    system.build.rpiOtpDerivedKeyInstallHooks = lib.mkIf
-      (
-        raspberryPiBootloaderEnabled
-      )
-      (
-        lib.filter (hook: hook != null) [
-          installOtpCheckHook
-          installSaltHook
-        ]
-      );
+    system.preSwitchChecks = preSwitchInitrdSaltCheck;
 
     systemd.services = stage2SaltServices // stage2SecretServices;
 
     boot.initrd.secrets = lib.mkIf hasInitrdSecrets initrdBootSecrets;
 
     boot.initrd.systemd = lib.mkIf hasInitrdSecrets {
-      additionalUpstreamUnits = lib.optionals (config.boot.initrd.luks.devices == { }) [
-        "cryptsetup-pre.target"
-        "cryptsetup.target"
-      ];
       initrdBin = defaultInitrdPackages;
       storePaths = map (source: { inherit source; }) initrdServiceStorePaths;
       services = initrdSecretServices;

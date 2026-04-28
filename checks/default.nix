@@ -172,6 +172,9 @@ let
       rpi-otp-derived-key-ensure-script = pkgs.callPackage ./rpi-otp-derived-key-ensure-script.nix {
         inherit self;
       };
+      rpi-otp-derived-key-generic-initrd = pkgs.callPackage ./rpi-otp-derived-key-generic-initrd.nix {
+        inherit self nixpkgs;
+      };
       rpi-otp-derived-key-invalid-configs = pkgs.callPackage ./rpi-otp-derived-key-invalid-configs.nix {
         inherit self nixpkgs;
       };

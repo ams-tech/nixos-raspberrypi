@@ -35,6 +35,7 @@ in
       format = "hex";
       path = stagedKey;
       neededForBoot = true;
+      # LUKS is the consumer, so it owns the cryptsetup-specific ordering.
       before = [ "cryptsetup-pre.target" ];
     };
   };

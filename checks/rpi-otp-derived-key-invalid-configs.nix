@@ -104,21 +104,6 @@ let
         };
       }
     ])
-    (expectFailure "needed-for-boot-without-raspberry-pi-bootloader" [
-      {
-        boot.initrd.systemd.enable = true;
-        boot.loader.supportsInitrdSecrets = true;
-
-        services.rpiOtpDerivedKey = {
-          enable = true;
-          secrets.bad = {
-            format = "hex";
-            path = "/run/bad-key";
-            neededForBoot = true;
-          };
-        };
-      }
-    ])
   ];
 in
 pkgs.writeText "rpi-otp-derived-key-invalid-configs" ''
