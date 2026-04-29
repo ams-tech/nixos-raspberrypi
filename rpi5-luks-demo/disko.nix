@@ -53,6 +53,7 @@ in
                 keyFile = stagedKey;
                 allowDiscards = true;
               }
+              # This is a disko-only hook.
               preCreateHook = ''
                 # Generate a random salt for our LUKS volume & derive a key from it.
                 ${lib.getExe rpiOtpProvision} stage \
@@ -79,7 +80,7 @@ in
           type = "filesystem";
           format = "ext4";
           mountpoint = "/";
-
+          # This is a disko-only hook -- it when disko-install mounts this partition.
           postMountHook = ''
             ${lib.getExe rpiOtpProvision} install-salt \
               --salt-file "${stagedSalt}" \
