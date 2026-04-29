@@ -27,22 +27,19 @@ in
       content = {
         type = "gpt";
         partitions = {
-          firmware = {
-            size = "512M";
+          boot = {
+            priority = 1;
+            size = "1G";
             type = "0700";
             content = {
               type = "filesystem";
               format = "vfat";
-              extraArgs = [
-                "-F"
-                "32"
-                "-n"
-                "FIRMWARE"
-              ];
               mountpoint = "/boot/firmware";
               mountOptions = [
-                "fmask=0077"
-                "dmask=0077"
+                  "noatime"
+                  "noauto"
+                  "x-systemd.automount"
+                  "x-systemd.idle-timeout=1min"
               ];
             };
           };
@@ -52,18 +49,12 @@ in
             content = {
               type = "luks";
               name = "crypted";
-              settings.keyFile = stagedKey;
-              extraFormatArgs = [
-                "--type"
-                "luks2"
-              ];
-
+              settings = {
+                keyFile = stagedKey;
+                allowDiscards = true;
+              }
               preCreateHook = ''
-                if ${pkgs.cryptsetup}/bin/cryptsetup isLuks "$device" >/dev/null 2>&1; then
-                  echo "Refusing to reuse existing LUKS device $device for OTP-derived install key." >&2
-                  exit 1
-                fi
-
+                # Generate a random salt for our LUKS volume & derive a key from it.
                 ${lib.getExe rpiOtpProvision} stage \
                   --format hex \
                   --salt-file "${stagedSalt}" \
