@@ -52,7 +52,7 @@ in
               settings = {
                 keyFile = stagedKey;
                 allowDiscards = true;
-              }
+              };
               # This is a disko-only hook.
               preCreateHook = ''
                 # Generate a random salt for our LUKS volume & derive a key from it.
