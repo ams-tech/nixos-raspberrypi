@@ -7,6 +7,7 @@ export PATH=/empty:@path@
 # used to track copied files to decide which are obsolete
 # and need to be removed
 declare -A filesCopied
+declare -A initrdSecretsAppended
 
 # Convert a path to a file in the Nix store such as
 # /nix/store/<hash>-<name>/file to <hash>-<name>-<file>.
@@ -40,6 +41,57 @@ copyForced() {
     mv $dst.tmp $dst
 }
 
+loadInitrdSecretsScript() {
+    local generationPath="$1"
+    local bootspec="$generationPath/boot.json"
+
+    if ! [ -e "$bootspec" ]; then
+        return 0
+    fi
+
+    jq -r '."org.nixos.bootspec.v1".initrdSecrets // empty' "$bootspec"
+}
+
+appendInitrdSecrets() {
+    local generationPath="$1"
+    local initrdPath="$2"
+    local generationName="$3"
+
+    if [ "${initrdSecretsAppended[$initrdPath]:-}" = 1 ]; then
+        return 0
+    fi
+
+    local initrdSecrets
+    initrdSecrets="$(loadInitrdSecretsScript "$generationPath")"
+
+    if [ -z "$initrdSecrets" ]; then
+        initrdSecretsAppended["$initrdPath"]=1
+        return 0
+    fi
+
+    local initrdDir
+    local tmpPath
+    initrdDir="$(dirname "$initrdPath")"
+    tmpPath="$(mktemp "$initrdDir/.initrd.tmp.XXXXXX")"
+
+    cp "$initrdPath" "$tmpPath"
+    if "$initrdSecrets" "$tmpPath"; then
+        mv "$tmpPath" "$initrdPath"
+        initrdSecretsAppended["$initrdPath"]=1
+        return 0
+    fi
+
+    rm -f "$tmpPath"
+
+    if [ "$generationName" = "default" ]; then
+        echo "failed to create initrd secrets!" >&2
+        exit 1
+    fi
+
+    echo "warning: failed to create initrd secrets for \"$generationName\", an older generation" >&2
+    echo "note: this is normal after having removed or renamed a file in \`boot.initrd.secrets\`" >&2
+}
+
 # Copy generation's kernel and initrd to `kernelsDir`.
 # Default generation's are also copied to `outdir`
 addEntry() {
@@ -59,6 +111,8 @@ addEntry() {
         copyToKernelsDir $kernel $kernelsDir; kernel=$result
         copyToKernelsDir $initrd $kernelsDir; initrd=$result
     fi
+
+    appendInitrdSecrets "$generationPath" "$initrd" "$generationName"
 
     echo $(readlink -f $generationPath) > $kernelsDir/$generationName-system
     echo $(readlink -f $generationPath/init) > $kernelsDir/$generationName-init
@@ -110,16 +164,20 @@ addAllEntries() {
 }
 
 usage() {
-    echo "usage: $0 -c <path-to-default-configuration> [-d <boot-dir>]" >&2
+    echo "usage: $0 [-i] -c <path-to-default-configuration> [-d <boot-dir>]" >&2
     exit 1
 }
 
 
 default=                # Default configuration
+runInstallHook=0
+boottarget=
+fwtarget=
 
-echo "kernelboot-builder: $@"
-while getopts "c:b:f:" opt; do
+echo "kernelboot-builder: $*"
+while getopts "ic:b:f:" opt; do
     case "$opt" in
+        i) runInstallHook=1 ;;
         c) default="$OPTARG" ;;
         b) boottarget="$OPTARG" ;;
         f) fwtarget="$OPTARG" ;;
@@ -130,6 +188,13 @@ done
 if [ -z "$boottarget" ] && [ -z "$fwtarget" ]; then
     echo "Error: at least one of \`-b <boot-dir>\` and \`-f <firmware-dir>\` must be set"
     usage
+fi
+
+if [ "$runInstallHook" = "1" ]; then
+    pre_install_hook=@preInstallHook@
+    if [ -n "$pre_install_hook" ]; then
+        "$pre_install_hook" "$default" "$boottarget" "$fwtarget"
+    fi
 fi
 
 if [ -n "$fwtarget" ]; then

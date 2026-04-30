@@ -16,6 +16,51 @@ copyForced() {
     mv "$dstTmp" "$dst"
 }
 
+loadInitrdSecretsScript() {
+    local generationPath="$1"
+    local bootspec="$generationPath/boot.json"
+
+    if ! [ -e "$bootspec" ]; then
+        return 0
+    fi
+
+    jq -r '."org.nixos.bootspec.v1".initrdSecrets // empty' "$bootspec"
+}
+
+appendInitrdSecrets() {
+    local generationPath="$1"
+    local initrdPath="$2"
+    local generationName="$3"
+
+    local initrdSecrets
+    initrdSecrets="$(loadInitrdSecretsScript "$generationPath")"
+
+    if [ -z "$initrdSecrets" ]; then
+        return 0
+    fi
+
+    local initrdDir
+    local tmpPath
+    initrdDir="$(dirname "$initrdPath")"
+    tmpPath="$(mktemp "$initrdDir/.initrd.tmp.XXXXXX")"
+
+    cp "$initrdPath" "$tmpPath"
+    if "$initrdSecrets" "$tmpPath"; then
+        mv "$tmpPath" "$initrdPath"
+        return 0
+    fi
+
+    rm -f "$tmpPath"
+
+    if [ "$generationName" = "default" ]; then
+        echo "failed to create initrd secrets!" >&2
+        exit 1
+    fi
+
+    echo "warning: failed to create initrd secrets for \"$generationName\", an older generation" >&2
+    echo "note: this is normal after having removed or renamed a file in \`boot.initrd.secrets\`" >&2
+}
+
 # Copy generation's kernel, initrd, cmdline to `genDir`.
 addEntry() {
     local generationPath="$1"
@@ -36,6 +81,7 @@ addEntry() {
 
     copyForced "$kernel" "$genDir/kernel.img"
     copyForced "$initrd" "$genDir/initrd"
+    appendInitrdSecrets "$generationPath" "$genDir/initrd" "$generationName"
     echo "$(cat "$generationPath/kernel-params") init=$generationPath/init" > "$genDir/cmdline.txt"
 
     echo -n "device tree..."
@@ -54,7 +100,7 @@ generationPath=         # Path to nixos configuration/generation
 generationName=         # Name of the generation
 target=/boot/firmware   # Target directory
 
-echo "$0: $@"
+echo "$0: $*"
 while getopts "c:n:d:" opt; do
     case "$opt" in
         c) generationPath="$OPTARG" ;;
