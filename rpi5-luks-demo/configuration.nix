@@ -6,6 +6,11 @@
 
 let
   operatorKeys = import ./ssh-keys.nix;
+  adamKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMjtOqSWLDq79t/9XljmBrfBVm8deQJdOQmTV7c45Ni adam@malak"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIojZ/xu4CVq5TbY51CMUlRiWnSdkS7ZN9xL10gNrFux black@plagueis"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIDVEuyPwmcEybp5d1/FEbCPOjCfuRZ2vp7tYGqe64mg adamschafer@starkiller"
+  ];
 in
 {
   imports = with nixos-raspberrypi.nixosModules; [
@@ -59,6 +64,13 @@ in
 
   users.users = {
     root.openssh.authorizedKeys.keys = operatorKeys;
+
+    adam = {
+      isNormalUser = true;
+      description = "Test account for Adam Schafer";
+      extraGroups = [ "wheel" ];
+      openssh.authorizedKeys.keys = adamKeys;
+    };
 
     nixos = {
       isNormalUser = true;
