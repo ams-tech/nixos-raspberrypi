@@ -72,7 +72,14 @@ in
     }
     // (args.features or { });
 
-    kernelPatches = args.kernelPatches or [ ];
+    # All retained 6.18 model variants share the two affected destructors.
+    # Keep the reviewed firmware/source pair and backport the stable fix.
+    kernelPatches = lib.unique (
+      (args.kernelPatches or [ ])
+      ++ lib.optional (
+        lib.versions.majorMinor modDirVersion == "6.18" && lib.versionOlder modDirVersion "6.18.56"
+      ) (import ./ipv4-tcp-options-rcu.nix)
+    );
 
     extraMeta =
       if

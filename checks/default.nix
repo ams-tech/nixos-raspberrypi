@@ -278,6 +278,7 @@ let
       pkgs = nixpkgs.legacyPackages.${system};
     in
     {
+      ipv4-tcp-options-rcu = import ./ipv4-tcp-options-rcu.nix { inherit pkgs self; };
       raspberrypi-initrd-secrets = pkgs.callPackage ./raspberrypi-initrd-secrets.nix { };
       rpi-otp-derived-key-before = pkgs.callPackage ./rpi-otp-derived-key-before.nix {
         inherit self;

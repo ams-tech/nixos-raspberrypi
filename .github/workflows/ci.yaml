@@ -10,6 +10,7 @@ on:
 
   pull_request:
     branches:
+      - kaiba
       - main
       - develop
       - rpi-otp-private-key
@@ -30,3 +31,5 @@ jobs:
 
       - name: Run formatter
         run: nix fmt . -- --ci
+      - name: Check IPv4 TCP options lifetime backport
+        run: nix build --no-link -L .#checks.x86_64-linux.ipv4-tcp-options-rcu
