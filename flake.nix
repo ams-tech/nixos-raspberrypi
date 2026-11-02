@@ -104,6 +104,7 @@
       };
 
       nixosModules = {
+        ipv4-tcp-options-rcu = import ./modules/ipv4-tcp-options-rcu.nix;
         trusted-nix-caches = import ./modules/trusted-nix-caches.nix;
         nixpkgs-rpi = import ./modules/nixpkgs-rpi.nix;
         rpi-otp-derived-key = import ./modules/rpi-otp-derived-key.nix;
